@@ -398,6 +398,18 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = memo(({
                     />
                   </div>
                 </div>
+                <div className="sm:col-span-2">
+                  <label className="font-bold text-slate-700 block mb-1">
+                    Backend Server URL (<code className="font-mono text-[11px]">apiBaseUrl</code> — for Capacitor iOS/Android builds; leave blank on Web/PWA)
+                  </label>
+                  <input
+                    type="url"
+                    value={draft.apiBaseUrl || ''}
+                    onChange={e => setDraft(prev => ({ ...prev, apiBaseUrl: e.target.value }))}
+                    placeholder="https://your-pool-server.example.com (blank uses same-origin /api)"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono text-slate-900"
+                  />
+                </div>
               </div>
             </div>
           )}

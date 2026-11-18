@@ -80,6 +80,17 @@ const ai = new GoogleGenAI({
 
 app.use(express.json({ limit: '10mb' }));
 
+// CORS middleware for Capacitor iOS/Android WebViews & remote SPA frontends
+app.use('/api', (_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (_req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORAGE_FILE = path.join(DATA_DIR, 'pool-storage.json');
 

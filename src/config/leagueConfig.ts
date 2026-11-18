@@ -40,10 +40,16 @@ export interface PoolConfig {
   enableHouseBot: boolean;
   houseBotName: string;
   houseBotTagline: string;
+  apiBaseUrl?: string;
   rules: PoolRulesConfig;
 }
 
 const POOL_CONFIG_STORAGE_KEY = 'nfl_pool_commercial_config_v1';
+
+const ENV_API_BASE_URL =
+  typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL
+    ? String((import.meta as any).env.VITE_API_BASE_URL).trim().replace(/\/+$/, '')
+    : '';
 
 export const DEFAULT_POOL_CONFIG: PoolConfig = {
   isSetupCompleted: false,
@@ -66,6 +72,7 @@ export const DEFAULT_POOL_CONFIG: PoolConfig = {
   enableHouseBot: true,
   houseBotName: 'Elvis',
   houseBotTagline: 'Honorary Permanent Member • Consensus Favorites',
+  apiBaseUrl: ENV_API_BASE_URL,
   rules: {
     tiebreakerRule: 'closest_over_or_under_co_champs',
     missedPickRule: 'vegas_autofill_human_priority',
@@ -147,6 +154,12 @@ export function savePoolConfig(next: Partial<PoolConfig>): PoolConfig {
   }
 
   return merged;
+}
+
+export function resolveApiUrl(path: string): string {
+  if (!path.startsWith('/api/')) return path;
+  const baseUrl = (getPoolConfig().apiBaseUrl || ENV_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  return baseUrl ? `${baseUrl}${path}` : path;
 }
 
 export const LEAGUE_CONFIG = {
