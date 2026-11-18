@@ -42,39 +42,64 @@ jobs:
       - name: Sync Capacitor Android project
         run: npx cap sync android
 
-      - name: Decode optional Android release keystore
+      - name: Prepare Android release signing keystore
         shell: bash
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SECRET_KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SECRET_KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SECRET_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SECRET_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "${{ runner.temp }}/release.keystore"
-            echo "ANDROID_KEYSTORE_PATH=${{ runner.temp }}/release.keystore" >> "$GITHUB_ENV"
+          KS_PATH="${{ runner.temp }}/release.keystore"
+          if [ -n "$SECRET_KS_B64" ]; then
+            echo "$SECRET_KS_B64" | base64 -d > "$KS_PATH"
+            echo "ANDROID_KEYSTORE_PATH=$KS_PATH" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=$SECRET_KS_PASS" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=$SECRET_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -v \
+              -keystore "$KS_PATH" \
+              -storetype PKCS12 \
+              -storepass "android" \
+              -keypass "android" \
+              -alias "nflpool_upload" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=49Caliber Labs, O=49Caliber Labs, C=US"
+            echo "ANDROID_KEYSTORE_PATH=$KS_PATH" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=nflpool_upload" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=android" >> "$GITHUB_ENV"
           fi
 
-      - name: Build Debug APK & Release AAB
+      - name: Build Debug APK, Signed Release APK & Release AAB
         working-directory: android
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug bundleRelease
+          ./gradlew assembleDebug assembleRelease bundleRelease
 
       - name: Package release assets
         shell: bash
         run: |
           mkdir -p release-assets
           cp android/app/build/outputs/apk/debug/*.apk release-assets/branham-hills-nfl-pool-debug.apk
+          cp android/app/build/outputs/apk/release/*.apk release-assets/branham-hills-nfl-pool-release.apk
           cp android/app/build/outputs/bundle/release/*.aab release-assets/branham-hills-nfl-pool-release.aab
           ls -lh release-assets
 
-      - name: Upload Android APK artifact
+      - name: Upload Android Debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: branham-hills-pool-android-debug-apk
           path: release-assets/branham-hills-nfl-pool-debug.apk
+
+      - name: Upload Android Release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: branham-hills-pool-android-release-apk
+          path: release-assets/branham-hills-nfl-pool-release.apk
 
       - name: Upload Android Release AAB artifact
         uses: actions/upload-artifact@v4
@@ -88,6 +113,7 @@ jobs:
         with:
           files: |
             release-assets/branham-hills-nfl-pool-debug.apk
+            release-assets/branham-hills-nfl-pool-release.apk
             release-assets/branham-hills-nfl-pool-release.aab
           generate_release_notes: true
 
