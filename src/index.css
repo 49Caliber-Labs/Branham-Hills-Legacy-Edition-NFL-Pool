@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  --theme-primary: #142d21;
+  --theme-header-bg: #1b3a2b;
+  --theme-sub-header: #203731;
+  --theme-secondary: #10b981;
+  --theme-accent: #34d399;
+  --theme-border: #064e3b;
+  --theme-text: #ffffff;
+  --theme-ring: #10b981;
+}
+
+/* CSS Containment utilities for layout isolation & rendering performance */
+.contain-content {
+  contain: content;
+}
+
+.contain-strict {
+  contain: strict;
+}
+
+.contain-paint {
+  contain: paint;
+}
+
+.contain-layout {
+  contain: layout;
+}
+
+.contain-modal {
+  contain: layout paint;
+}
+
+.contain-list {
+  contain: content;
+}

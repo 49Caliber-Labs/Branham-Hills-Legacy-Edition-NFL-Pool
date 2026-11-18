@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Picks collection: Allow read/write for zero-login simplicity and server sync
+    match /picks/{contenderName} {
+      allow read, write: if true;
+    }
+
+    // Metadata and other collections (games, players, dispatches, etc.)
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+
