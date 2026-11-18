@@ -12,7 +12,10 @@ import {
   Flag,
   Bot,
   KeyRound,
-  AlertTriangle
+  AlertTriangle,
+  Copy,
+  Check,
+  Link2
 } from 'lucide-react';
 import {
   PoolConfig,
@@ -20,7 +23,10 @@ import {
   TiebreakerRule,
   MissedPickRule,
   getPoolConfig,
-  resolveMaxContendersForTier
+  resolveMaxContendersForTier,
+  verifyLicenseKey,
+  getShareableLeagueUrl,
+  sanitizeLeagueCode
 } from '../config/leagueConfig';
 
 interface SetupWizardModalProps {
@@ -45,6 +51,7 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = memo(({
     Boolean(initialConfig.commissionerCommitmentAccepted)
   );
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState<boolean>(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -110,6 +117,19 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = memo(({
     setDisclaimerChecked(true);
     setCommitmentChecked(true);
     handleSaveAndLaunch(true);
+  };
+
+  const licenseVerification = verifyLicenseKey(draft.licenseKey);
+  const shareableLeagueUrl = getShareableLeagueUrl(draft.leagueCode);
+
+  const handleCopyInviteLink = async () => {
+    try {
+      await navigator.clipboard.writeText(shareableLeagueUrl);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2500);
+    } catch {
+      setLinkCopied(false);
+    }
   };
 
   return (
@@ -307,17 +327,52 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = memo(({
               </div>
 
               {draft.editionTier !== 'opensource' && (
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center gap-2.5">
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 shrink-0">
-                    <KeyRound className="w-4 h-4 text-emerald-700" />
-                    <span>Lifetime License Key (Optional for Self-Hosted Demo):</span>
+                <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                      <KeyRound className="w-4 h-4 text-emerald-700" />
+                      <span>Lifetime License Key (Optional for Self-Hosted Demo)</span>
+                    </div>
+                    {licenseVerification.valid && licenseVerification.tier ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                        Verified Lifetime License ({licenseVerification.tier === 'league_100' ? 'League ≤100' : 'Standard ≤20'})
+                      </span>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                          Self-Hosted / Demo Mode
+                        </span>
+                        <a
+                          href="https://49caliber.com/download.html#nfl-pool"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] font-bold text-sky-700 hover:underline whitespace-nowrap"
+                        >
+                          Get Lifetime Key ($9.99 / $19.99) &rarr;
+                        </a>
+                      </div>
+                    )}
                   </div>
                   <input
                     type="text"
                     value={draft.licenseKey}
-                    onChange={e => setDraft(prev => ({ ...prev, licenseKey: e.target.value }))}
-                    placeholder="e.g. DAWSON-49CAL-XXXX"
-                    className="flex-1 bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-mono"
+                    onChange={e => {
+                      const rawKey = e.target.value;
+                      const verified = verifyLicenseKey(rawKey);
+                      setDraft(prev => ({
+                        ...prev,
+                        licenseKey: rawKey,
+                        ...(verified.valid && verified.tier
+                          ? {
+                              editionTier: verified.tier,
+                              maxContenders: resolveMaxContendersForTier(verified.tier)
+                            }
+                          : {})
+                      }));
+                    }}
+                    placeholder="e.g. DAWSON-STD20-XXXX-XXXX"
+                    className="w-full bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-mono uppercase"
                   />
                 </div>
               )}
@@ -398,6 +453,55 @@ export const SetupWizardModal: React.FC<SetupWizardModalProps> = memo(({
                     />
                   </div>
                 </div>
+                <div className="sm:col-span-2 p-3.5 rounded-xl bg-sky-50/80 border border-sky-200 space-y-2.5">
+                  <div className="flex items-center gap-1.5 font-black text-sky-950 text-xs">
+                    <Link2 className="w-4 h-4 text-sky-700" />
+                    <span>Multi-Device League Room Code &amp; Contender Invite Link</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="font-bold text-slate-700 block mb-1 text-[11px]">League Room Code</label>
+                      <input
+                        type="text"
+                        value={draft.leagueCode}
+                        onChange={e =>
+                          setDraft(prev => ({
+                            ...prev,
+                            leagueCode: e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, '-').slice(0, 32)
+                          }))
+                        }
+                        onBlur={() =>
+                          setDraft(prev => ({
+                            ...prev,
+                            leagueCode: sanitizeLeagueCode(prev.leagueCode)
+                          }))
+                        }
+                        placeholder="DAWSON-2026"
+                        className="w-full bg-white border border-sky-300 rounded-lg px-3 py-2 font-mono font-bold text-slate-900 uppercase text-xs"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="font-bold text-slate-700 block mb-1 text-[11px]">Shareable Contender Invite URL</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          readOnly
+                          value={shareableLeagueUrl}
+                          className="flex-1 bg-white border border-slate-300 rounded-lg px-2.5 py-2 font-mono text-[11px] text-slate-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleCopyInviteLink}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shrink-0 cursor-pointer transition-colors"
+                        >
+                          {linkCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                          <span>{linkCopied ? 'Copied!' : 'Copy Invite Link'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="sm:col-span-2">
                   <label className="font-bold text-slate-700 block mb-1">
                     Backend Server URL (<code className="font-mono text-[11px]">apiBaseUrl</code> — for Capacitor iOS/Android builds; leave blank on Web/PWA)

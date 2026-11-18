@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from "@google/genai";
 import { db, isFirebaseConfigured } from './src/lib/firebase-client.ts';
@@ -80,19 +81,44 @@ const ai = new GoogleGenAI({
 
 app.use(express.json({ limit: '10mb' }));
 
-// CORS middleware for Capacitor iOS/Android WebViews & remote SPA frontends
-app.use('/api', (_req, res, next) => {
+// CORS middleware & Multi-Tenant League Context for Capacitor iOS/Android WebViews & remote SPA frontends
+const leagueContext = new AsyncLocalStorage<string>();
+
+app.use('/api', (req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (_req.method === 'OPTIONS') {
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-League-Id');
+  if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
-  next();
+  const rawLeague = (req.headers['x-league-id'] || req.query.league || '') as string;
+  const leagueId = String(rawLeague)
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  leagueContext.run(leagueId || 'DEFAULT', () => next());
 });
 
 const DATA_DIR = path.join(process.cwd(), 'data');
+const LEAGUES_DIR = path.join(DATA_DIR, 'leagues');
 const STORAGE_FILE = path.join(DATA_DIR, 'pool-storage.json');
+
+function getActiveLeagueId(): string {
+  const lid = leagueContext.getStore() || 'DEFAULT';
+  if (!lid || lid === 'DEFAULT' || lid === 'DAWSON-2026') {
+    return 'DEFAULT';
+  }
+  return lid;
+}
+
+function getActiveStorageFile(): string {
+  const lid = getActiveLeagueId();
+  if (lid === 'DEFAULT') {
+    return STORAGE_FILE;
+  }
+  return path.join(LEAGUES_DIR, `${lid}.json`);
+}
 
 // Interface for Master Timeclock event ledger
 export interface MasterClockLedger {
@@ -150,9 +176,12 @@ interface PoolStorageState {
   lastUpdated: string;
 }
 
-// Ensure data directory exists
+// Ensure data directories exist
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(LEAGUES_DIR)) {
+  fs.mkdirSync(LEAGUES_DIR, { recursive: true });
 }
 
 // Known placeholder or ghost contender names from prototyping that must never re-enter the pool
@@ -664,9 +693,10 @@ export function certifyLockedGamePicks(
       if (poolState) {
         saveSafeWeekPicksArchive(weekNumber, poolState.picks);
         try {
-          const tempFile = `${STORAGE_FILE}.tmp.${Date.now()}`;
-          fs.writeFileSync(tempFile, JSON.stringify(poolState, null, 2), 'utf-8');
-          fs.renameSync(tempFile, STORAGE_FILE);
+          const activeStorageFile = getActiveStorageFile();
+          const tempFile = `${activeStorageFile}.tmp.${Date.now()}`;
+          fs.writeFileSync(tempFile, JSON.stringify(getActivePoolState(), null, 2), 'utf-8');
+          fs.renameSync(tempFile, activeStorageFile);
         } catch (e) {}
 
         // Immediately sync any kickoff Vegas autofilled contender sheets to Cloud Firestore
@@ -798,11 +828,12 @@ export function getEffectivePicksForWeek(
   return effective;
 }
 
-// Read pool state from disk, or initialize if missing
+// Read pool state from active league disk file, or initialize if missing
 function loadPoolState(): PoolStorageState {
+  const activeStorageFile = getActiveStorageFile();
   try {
-    if (fs.existsSync(STORAGE_FILE)) {
-      const data = fs.readFileSync(STORAGE_FILE, 'utf-8');
+    if (fs.existsSync(activeStorageFile)) {
+      const data = fs.readFileSync(activeStorageFile, 'utf-8');
       const parsed = JSON.parse(data);
       // Validate structure has required keys
       if (parsed && Array.isArray(parsed.games) && Array.isArray(parsed.players) && parsed.picks) {
@@ -811,7 +842,7 @@ function loadPoolState(): PoolStorageState {
       }
     }
   } catch (err) {
-    console.error('[Server Storage] Error reading pool-storage.json, falling back to initial data:', err);
+    console.error(`[Server Storage] Error reading ${activeStorageFile}, falling back to initial data:`, err);
   }
 
   const initial = getInitialPoolState();
@@ -822,17 +853,18 @@ function loadPoolState(): PoolStorageState {
 let isFirestoreQuotaExhausted = false;
 let quotaExhaustedRetryAfter = 0;
 
-// Save pool state safely to disk
+// Save pool state safely to active league storage file
 async function savePoolState(state: PoolStorageState, syncPicksToCloud = false): Promise<void> {
+  const activeStorageFile = getActiveStorageFile();
   try {
     const sanitized = sanitizePoolState(state);
     sanitized.lastUpdated = new Date().toISOString();
     
     // Save to local disk for fast cold-starts
     const serialized = JSON.stringify(sanitized, null, 2);
-    const tempFile = `${STORAGE_FILE}.tmp.${Date.now()}`;
+    const tempFile = `${activeStorageFile}.tmp.${Date.now()}`;
     fs.writeFileSync(tempFile, serialized, 'utf-8');
-    fs.renameSync(tempFile, STORAGE_FILE);
+    fs.renameSync(tempFile, activeStorageFile);
 
     // CRITICAL CLOUD THROTTLE: Never run bulk metadata writes to Firestore on automated 30s background ticks!
     // Only attempt Firestore write if explicitly requested (e.g. pick submission, admin override)
@@ -1219,7 +1251,7 @@ async function syncFromCloud(): Promise<boolean> {
 
     // Save the newly synced state to disk
     const sanitized = sanitizePoolState(poolState);
-    fs.writeFileSync(STORAGE_FILE, JSON.stringify(sanitized, null, 2), 'utf-8');
+    fs.writeFileSync(getActiveStorageFile(), JSON.stringify(sanitized, null, 2), 'utf-8');
     return true;
   } catch (err) {
     console.error('[Firebase Sync] Critical error during cloud sync:', err);
@@ -1227,8 +1259,41 @@ async function syncFromCloud(): Promise<boolean> {
   return false;
 }
 
-// In-memory reference populated on start
-let poolState: PoolStorageState = loadPoolState();
+// Per-league isolated in-memory cache populated lazily per AsyncLocalStorage context
+const leagueStates = new Map<string, PoolStorageState>();
+leagueStates.set('DEFAULT', loadPoolState());
+
+function getActivePoolState(): PoolStorageState {
+  const lid = getActiveLeagueId();
+  let state = leagueStates.get(lid);
+  if (!state) {
+    state = loadPoolState();
+    leagueStates.set(lid, state);
+  }
+  return state;
+}
+
+function setActivePoolState(next: PoolStorageState): void {
+  leagueStates.set(getActiveLeagueId(), next);
+}
+
+const poolState: PoolStorageState = new Proxy({} as PoolStorageState, {
+  get(_target, prop) {
+    return Reflect.get(getActivePoolState(), prop);
+  },
+  set(_target, prop, value) {
+    return Reflect.set(getActivePoolState(), prop, value);
+  },
+  has(_target, prop) {
+    return prop in getActivePoolState();
+  },
+  ownKeys() {
+    return Reflect.ownKeys(getActivePoolState());
+  },
+  getOwnPropertyDescriptor(_target, prop) {
+    return Object.getOwnPropertyDescriptor(getActivePoolState(), prop);
+  }
+});
 
 // Active Google OAuth Bearer Token stored in-memory (never persisted to disk per security constraints)
 let activeGoogleToken: string | null = null;
@@ -1695,7 +1760,7 @@ export async function executeSundayNightSequence(activeWeek: number): Promise<{
     // Persist immediately to disk so dispatch is durable
     try {
       const sanitized = sanitizePoolState(poolState);
-      fs.writeFileSync(STORAGE_FILE, JSON.stringify(sanitized, null, 2), 'utf-8');
+      fs.writeFileSync(getActiveStorageFile(), JSON.stringify(sanitized, null, 2), 'utf-8');
       console.log(`[Master Clock] ✓ Week ${activeWeek} Sunday dispatch persisted to local disk.`);
     } catch (fsErr: any) {
       console.error('[Master Clock] Local disk write error:', fsErr.message);
@@ -2141,7 +2206,7 @@ const handleGenerateDispatchEndpoint = async (req: express.Request, res: express
   // Persist directly to local disk
   try {
     const sanitized = sanitizePoolState(poolState);
-    fs.writeFileSync(STORAGE_FILE, JSON.stringify(sanitized, null, 2), 'utf-8');
+    fs.writeFileSync(getActiveStorageFile(), JSON.stringify(sanitized, null, 2), 'utf-8');
   } catch (fsErr: any) {
     console.error('[Dispatch Endpoint] Local storage write warning:', fsErr.message);
   }
@@ -3921,9 +3986,9 @@ app.post('/api/season-history', async (req, res) => {
 
 // Reset to default seed data (useful for testing or starting fresh)
 app.post('/api/reset-seed', async (_req, res) => {
-  poolState = getInitialPoolState();
+  setActivePoolState(getInitialPoolState());
   await savePoolState(poolState, true);
-  res.json({ success: true, message: 'Pool state reset to official seed data', poolState });
+  res.json({ success: true, message: 'Pool state reset to official seed data', poolState: getActivePoolState() });
 });
 
 // Clear active week picks for all players so contenders can start fresh picking
@@ -4024,7 +4089,7 @@ app.post('/api/admin/import-backup', async (req, res) => {
       return res.status(400).json({ error: 'Invalid backup file format' });
     }
     const sanitized = sanitizePoolState(backup);
-    poolState = sanitized;
+    setActivePoolState(sanitized);
     await savePoolState(poolState, true);
     res.json({ success: true, message: 'Pool state successfully restored from backup and synced to Firestore Cloud!' });
   } catch (err: any) {
