@@ -33,7 +33,7 @@ On initial boot, administrators are guided through the **Commissioner Setup Wiza
 
 ## Quick Start (Local Web & PWA)
 
-**Prerequisites:** Node.js 20+
+**Prerequisites:** Node.js 22+
 
 ```bash
 npm install
