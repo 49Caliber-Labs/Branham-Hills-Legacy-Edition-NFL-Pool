@@ -4,7 +4,12 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   android-build:
@@ -37,23 +42,51 @@ jobs:
       - name: Sync Capacitor Android project
         run: npx cap sync android
 
+      - name: Decode optional Android release keystore
+        if: secrets.ANDROID_KEYSTORE_BASE64 != ''
+        shell: bash
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "${{ runner.temp }}/release.keystore"
+          echo "ANDROID_KEYSTORE_PATH=${{ runner.temp }}/release.keystore" >> "$GITHUB_ENV"
+
       - name: Build Debug APK & Release AAB
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug bundleRelease
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp android/app/build/outputs/apk/debug/*.apk release-assets/branham-hills-nfl-pool-debug.apk
+          cp android/app/build/outputs/bundle/release/*.aab release-assets/branham-hills-nfl-pool-release.aab
+          ls -lh release-assets
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: branham-hills-pool-android-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: release-assets/branham-hills-nfl-pool-debug.apk
 
       - name: Upload Android Release AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: branham-hills-pool-android-release-aab
-          path: android/app/build/outputs/bundle/release/*.aab
+          path: release-assets/branham-hills-nfl-pool-release.aab
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/branham-hills-nfl-pool-debug.apk
+            release-assets/branham-hills-nfl-pool-release.aab
+          generate_release_notes: true
 
   ios-build:
     name: iOS Xcode Archive Verification

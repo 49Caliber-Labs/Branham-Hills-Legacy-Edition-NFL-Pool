@@ -8,3 +8,5 @@ coverage/
 !.env.example
 .antigravity/
 *.zip
+releases/
+release-assets/
