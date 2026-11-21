@@ -48,6 +48,7 @@ import { onSnapshot, collection, doc, setDoc, deleteDoc } from 'firebase/firesto
 import { db, isFirebaseConfigured } from './lib/firebase-client';
 import { trySilentGoogleAuth } from './services/gmailService';
 import { getStoredMatrixTheme } from './utils/nflTeamThemes';
+import { sanitizeClientSubmissionPicks } from './utils/pickRulesEngine';
 
 export default function App() {
   // Prune legacy storage artifacts once on app startup & apply stored global theme
@@ -688,21 +689,41 @@ export default function App() {
   }, []);
 
   // Player submitting their picks
-  const handleSavePicks = useCallback((contenderName: string, pickedGames: Record<number, string>, tiebreaker: number | '', adminOverride = false) => {
+  const handleSavePicks = useCallback((
+    contenderName: string,
+    pickedGames: Record<number, string>,
+    tiebreaker: number | '',
+    adminOverride = false,
+    allowClearUnlocked = false
+  ) => {
     const timestamp = new Date().toISOString();
+    const currentPrev = allPicksRef.current[contenderName];
+    const currentBasePicks = (currentPrev && currentPrev.week === activeWeekNum)
+      ? (currentPrev.picks || {})
+      : {};
+    const sanitizedMergedForSync = sanitizeClientSubmissionPicks(
+      currentBasePicks,
+      pickedGames,
+      gamesRef.current,
+      { adminOverride, allowClearUnlocked }
+    );
+
     setAllPicks(prev => {
       const prevForContender = prev[contenderName];
       const basePicks = (prevForContender && prevForContender.week === activeWeekNum)
         ? (prevForContender.picks || {})
         : {};
+      const mergedPicks = sanitizeClientSubmissionPicks(
+        basePicks,
+        pickedGames,
+        gamesRef.current,
+        { adminOverride, allowClearUnlocked }
+      );
       const updated = {
         ...prev,
         [contenderName]: {
           contenderName,
-          picks: {
-            ...basePicks,
-            ...pickedGames
-          },
+          picks: mergedPicks,
           tiebreaker,
           submittedAt: timestamp,
           week: activeWeekNum
@@ -713,8 +734,17 @@ export default function App() {
       } catch (e) {}
       return updated;
     });
-    // Save to global server storage & Firestore stamped with activeWeekNum
-    savePicksGlobally(contenderName, pickedGames, tiebreaker, timestamp, adminOverride, activeWeekNum);
+    // Save merged, lockout-validated sheet to global server storage & Firestore
+    savePicksGlobally(
+      contenderName,
+      sanitizedMergedForSync,
+      tiebreaker,
+      timestamp,
+      adminOverride,
+      activeWeekNum,
+      gamesRef.current,
+      allowClearUnlocked
+    );
   }, [activeWeekNum]);
 
   // Admin updating player contact info & status

@@ -1,8 +1,9 @@
 import { Game, Player, PlayerPickData, WeeklyDispatch, ChatMessage, FineItem, SeasonHistory } from '../types';
 import { generateDispatchPayload, sendGmailMessage, createGmailDraft, getCachedAccessToken } from './gmailService';
-import { doc, setDoc, collection } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection } from 'firebase/firestore';
 import { db } from '../lib/firebase-client';
 import { guardedCloudWrite } from '../utils/cloudWriteWatchdog';
+import { isGameLockedAtTime, sanitizeClientSubmissionPicks } from '../utils/pickRulesEngine';
 
 export interface PoolDataResponse {
   games: Game[];
@@ -83,7 +84,9 @@ export async function savePicksGlobally(
   tiebreaker: number | '',
   submittedAt?: string,
   adminOverride?: boolean,
-  week?: number
+  week?: number,
+  games?: Game[],
+  allowClearUnlocked?: boolean
 ): Promise<{
   success: boolean;
   picks?: Record<string, PlayerPickData>;
@@ -95,25 +98,33 @@ export async function savePicksGlobally(
   let returnedPicks: Record<string, PlayerPickData> | undefined = undefined;
   const timestamp = submittedAt || new Date().toISOString();
 
+  const initialCleanPicks = Array.isArray(games) && games.length > 0
+    ? sanitizeClientSubmissionPicks({}, picks, games, {
+        adminOverride: !!adminOverride,
+        allowClearUnlocked: !!allowClearUnlocked
+      })
+    : picks;
+
   const pickData: PlayerPickData = {
     contenderName,
-    picks,
+    picks: initialCleanPicks,
     tiebreaker,
     submittedAt: timestamp,
     ...(typeof week === 'number' && week > 0 ? { week } : {})
   };
 
-  // Channel 1: Guaranteed Local Server API FIRST (Durable disk storage and authorative merge)
+  // Channel 1: Guaranteed Local Server API FIRST (Durable disk storage and authoritative merge)
   try {
     const res = await fetch('/api/picks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contenderName,
-        picks,
+        picks: initialCleanPicks,
         tiebreaker,
         submittedAt: timestamp,
         adminOverride: !!adminOverride,
+        allowClearUnlocked: !!allowClearUnlocked,
         week
       })
     });
@@ -130,26 +141,64 @@ export async function savePicksGlobally(
     console.warn(`[SyncService] Local server network error for ${contenderName}:`, srvErr);
   }
 
-  // Channel 2: Persist directly to Firestore Cloud with Watchdog Circuit Breaker & 2500ms timeout
+  // Channel 2: Persist to Firestore Cloud safely using authoritative merged picks
   try {
     if (db) {
-      const guardRes = await guardedCloudWrite(
-        `picks/${contenderName}`,
-        'submit_picks_client',
-        async () => {
-          const cloudPromise = setDoc(doc(db, 'picks', contenderName), pickData);
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Firestore write timeout after 2500ms')), 2500)
-          );
-          return Promise.race([cloudPromise, timeoutPromise]);
-        },
-        1
-      );
-      if (guardRes.success) {
-        cloudSaved = true;
-        console.log(`[Firestore] Successfully persisted picks for ${contenderName} directly to cloud.`);
+      let authoritativeRecord: PlayerPickData = returnedPicks?.[contenderName]
+        ? { ...returnedPicks[contenderName] }
+        : pickData;
+
+      // If local server wasn't reachable, reconcile against existing Firestore doc before writing
+      // so locked picks in cloud are never overwritten or deleted by an unmerged client view.
+      if (!serverSaved && !adminOverride && Array.isArray(games) && games.length > 0) {
+        try {
+          const snapPromise = getDoc(doc(db, 'picks', contenderName));
+          const snapTimeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 1500));
+          const existingSnap: any = await Promise.race([snapPromise, snapTimeout]);
+          if (existingSnap && typeof existingSnap.exists === 'function' && existingSnap.exists()) {
+            const cloudData = existingSnap.data() as PlayerPickData;
+            if (cloudData && cloudData.week === authoritativeRecord.week && cloudData.picks) {
+              authoritativeRecord = {
+                ...authoritativeRecord,
+                picks: sanitizeClientSubmissionPicks(
+                  cloudData.picks,
+                  authoritativeRecord.picks,
+                  games,
+                  { adminOverride: false, allowClearUnlocked: !!allowClearUnlocked }
+                )
+              };
+            }
+          }
+        } catch {}
+      }
+
+      const hasLockedGames = Array.isArray(games) && games.some(g => isGameLockedAtTime(g));
+      const isEmptySheet = Object.keys(authoritativeRecord.picks || {}).length === 0;
+
+      if (!adminOverride && isEmptySheet && (!allowClearUnlocked || hasLockedGames)) {
+        console.warn(`[Firestore] Skipped empty pick sheet overwrite for ${contenderName} to protect existing picks.`);
       } else {
-        console.warn(`[Firestore] Cloud write skipped or blocked by watchdog for ${contenderName}:`, guardRes.error);
+        const guardRes = await guardedCloudWrite(
+          `picks/${contenderName}`,
+          'submit_picks_client',
+          async () => {
+            const writeOptions = (allowClearUnlocked || adminOverride)
+              ? { mergeFields: ['contenderName', 'picks', 'tiebreaker', 'submittedAt', 'week'] }
+              : { merge: true };
+            const cloudPromise = setDoc(doc(db, 'picks', contenderName), authoritativeRecord, writeOptions);
+            const timeoutPromise = new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Firestore write timeout after 2500ms')), 2500)
+            );
+            return Promise.race([cloudPromise, timeoutPromise]);
+          },
+          1
+        );
+        if (guardRes.success) {
+          cloudSaved = true;
+          console.log(`[Firestore] Successfully persisted picks for ${contenderName} directly to cloud.`);
+        } else {
+          console.warn(`[Firestore] Cloud write skipped or blocked by watchdog for ${contenderName}:`, guardRes.error);
+        }
       }
     }
   } catch (fsErr: any) {

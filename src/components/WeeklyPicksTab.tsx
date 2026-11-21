@@ -23,6 +23,12 @@ import {
 import { Game, Player, PlayerPickData, SeasonHistory } from '../types';
 import { HelpModal } from './HelpModal';
 import { isGameLockedByKickoff } from '../utils/storageSanitizer';
+import {
+  applyBlankOnlyFavorites,
+  resolveDefaultMnfTiebreaker,
+  isGameLockedAtTime,
+  sanitizeClientSubmissionPicks
+} from '../utils/pickRulesEngine';
 import { isGameTie } from '../utils/nflTieEngine';
 import { formatTeamCityOrRegion } from '../utils/nflTeamThemes';
 
@@ -32,7 +38,13 @@ interface WeeklyPicksTabProps {
   activePlayer: Player | null;
   onSelectPlayer: (player: Player) => void;
   allPicks: Record<string, PlayerPickData>;
-  onSavePicks: (contenderName: string, picks: Record<number, string>, tiebreaker: number | '', adminOverride?: boolean) => void;
+  onSavePicks: (
+    contenderName: string,
+    picks: Record<number, string>,
+    tiebreaker: number | '',
+    adminOverride?: boolean,
+    allowClearUnlocked?: boolean
+  ) => void;
   onViewLeaderboard: () => void;
   isCompactMode?: boolean;
   currentWeek?: number;
@@ -601,7 +613,7 @@ export const WeeklyPicksTab: React.FC<WeeklyPicksTabProps> = memo(({
     triggerAutoSave(updated, tiebreakerInput);
   };
 
-  // Quick helper to fill remaining picks with favorites
+  // Quick helper to fill remaining blank unlocked games with favorites
   const handleQuickFillFavorites = () => {
     if (!activePlayer) {
       setIsContenderGridOpen(true);
@@ -609,23 +621,20 @@ export const WeeklyPicksTab: React.FC<WeeklyPicksTabProps> = memo(({
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    const updated: Record<number, string> = { ...selectedPicks };
-    games.forEach(g => {
-      if (!updated[g.gameNumber] && !isGameLockedByKickoff(g)) {
-        updated[g.gameNumber] = g.favorite || g.homeTeam;
-      }
-    });
-    setSelectedPicks(updated);
+    const basePicks = { ...(allPicks[activePlayer.name]?.picks || {}), ...selectedPicks };
+    const { picks: updated, filledCount } = applyBlankOnlyFavorites(basePicks, games, { allowLockedGames: false });
     let newTb = tiebreakerInput;
+    let tbFilled = false;
     if (!tiebreakerInput) {
-      const mnfGame = games.find(g => g.isMNF);
-      if (mnfGame?.overUnder) {
-        newTb = String(Math.round(mnfGame.overUnder));
-        setTiebreakerInput(newTb);
-      }
+      newTb = String(resolveDefaultMnfTiebreaker(games));
+      setTiebreakerInput(newTb);
+      tbFilled = true;
     }
+    setSelectedPicks(updated);
     setErrorMessage(null);
-    triggerAutoSave(updated, newTb);
+    if (filledCount > 0 || tbFilled) {
+      triggerAutoSave(updated, newTb);
+    }
   };
 
   const handleTiebreakerChange = (val: string) => {
@@ -637,11 +646,21 @@ export const WeeklyPicksTab: React.FC<WeeklyPicksTabProps> = memo(({
   };
 
   const handleClearPicks = () => {
-    if (window.confirm("Clear all your pick selections on this sheet?")) {
-      setSelectedPicks({});
-      setTiebreakerInput('');
+    if (window.confirm("Clear your unlocked pick selections on this sheet? (Locked/final games remain intact)")) {
+      const currentEffective = activePlayer ? { ...(allPicks[activePlayer.name]?.picks || {}), ...selectedPicks } : selectedPicks;
+      const preservedLocked = sanitizeClientSubmissionPicks(currentEffective, {}, games, {
+        adminOverride: isUnlockedOverride,
+        allowClearUnlocked: true
+      });
+      const mnfGame = games.find(g => g.isMNF);
+      const keepMnfTb = Boolean(!isUnlockedOverride && mnfGame && isGameLockedAtTime(mnfGame));
+      const nextTb = keepMnfTb ? tiebreakerInput : '';
+      setSelectedPicks(preservedLocked);
+      if (!keepMnfTb) {
+        setTiebreakerInput('');
+      }
       if (activePlayer) {
-        onSavePicks(activePlayer.name, {}, '', isUnlockedOverride);
+        onSavePicks(activePlayer.name, preservedLocked, nextTb !== '' ? Number(nextTb) : '', isUnlockedOverride, true);
         setSaveStatus('saved');
       }
     }

@@ -22,6 +22,20 @@ import { scrapeSundayNflAction } from './src/services/nflSundayScraperService.ts
 import { loadCommishQuotes, addCommishQuote } from './src/services/commishArchivesService.ts';
 import { formatTeamCityOrRegion } from './src/utils/nflTeamThemes.ts';
 import {
+  PickActor,
+  MissedPickPolicy,
+  CertifiedPickEntry,
+  buildElvisPickSheet,
+  resolveGameFavorite,
+  resolveDefaultMnfTiebreaker,
+  isGameLockedAtTime,
+  isGameEligibleForAutofill,
+  shouldIncomingSlotWin,
+  sanitizeClientSubmissionPicks,
+  mergeAuthoritativeWeekPicks,
+  normalizeTeamPickForGame
+} from './src/utils/pickRulesEngine.ts';
+import {
   canServerPerformCloudWrite,
   recordServerCloudWrite,
   guardedServerCloudWrite,
@@ -87,7 +101,7 @@ const leagueContext = new AsyncLocalStorage<string>();
 app.use('/api', (req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-League-Id');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-League-Id, X-Missed-Pick-Rule');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
@@ -97,7 +111,22 @@ app.use('/api', (req, res, next) => {
     .replace(/[^A-Z0-9_-]/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 32);
-  leagueContext.run(leagueId || 'DEFAULT', () => next());
+  const rawPolicy = String(req.headers['x-missed-pick-rule'] || '');
+  const validPolicy: MissedPickPolicy | undefined =
+    rawPolicy === 'vegas_autofill_human_priority' ||
+    rawPolicy === 'vegas_autofill_equal_standing' ||
+    rawPolicy === 'no_autofill_zero'
+      ? rawPolicy
+      : undefined;
+  leagueContext.run(leagueId || 'DEFAULT', () => {
+    if (validPolicy) {
+      const activeState = getActivePoolState();
+      if (activeState && activeState.missedPickPolicy !== validPolicy) {
+        activeState.missedPickPolicy = validPolicy;
+      }
+    }
+    next();
+  });
 });
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -160,6 +189,7 @@ interface PoolStorageState {
   fines: FineItem[];
   seasonHistory?: SeasonHistory;
   clockLedger?: MasterClockLedger;
+  missedPickPolicy?: MissedPickPolicy;
   adminCustomNote?: string;
   sundayStandings?: Record<string, {
     week: number;
@@ -190,42 +220,9 @@ const BANNED_PLACEHOLDER_NAMES = new Set([
   'steve', 'eddy', 'wy_joe', 'rich_sr', 'joe_t', 'gabe', 'perry', 'mike'
 ]);
 
-// Calculate Vegas Insider Favorites for Elvis
+// Calculate Vegas Insider Favorites for Elvis via canonical rules engine
 function getElvisVegasFavorites(gamesList: Game[]): PlayerPickData {
-  const picks: Record<number, string> = {};
-  gamesList.forEach(g => {
-    // Elvis gets official Vegas favorites - guaranteed to be one of the teams in the game
-    const away = (g.awayTeam || '').toLowerCase();
-    const home = (g.homeTeam || '').toLowerCase();
-    const fav = (g.favorite || '').toLowerCase();
-    
-    let chosenTeam = g.homeTeam;
-    if (fav) {
-      if (away.includes(fav) || fav.includes(away)) {
-        chosenTeam = g.awayTeam;
-      } else if (home.includes(fav) || fav.includes(home)) {
-        chosenTeam = g.homeTeam;
-      } else if (g.spread) {
-        const spreadPrefix = g.spread.split(' ')[0]?.toLowerCase() || '';
-        if (spreadPrefix && (away.includes(spreadPrefix) || spreadPrefix.includes(away))) {
-          chosenTeam = g.awayTeam;
-        } else {
-          chosenTeam = g.homeTeam;
-        }
-      }
-    }
-    picks[g.gameNumber] = chosenTeam;
-  });
-  const mnf = gamesList.find(g => g.isMNF);
-  const tiebreaker = mnf && mnf.overUnder ? Math.round(mnf.overUnder) : 48;
-  const activeWeek = gamesList.find(g => typeof g.week === 'number' && g.week > 0)?.week || gamesList[0]?.week || 6;
-  return {
-    contenderName: 'Elvis',
-    picks,
-    tiebreaker,
-    submittedAt: new Date().toISOString(),
-    week: activeWeek
-  };
+  return buildElvisPickSheet(gamesList);
 }
 
 // Initial state filter (strictly official roster only)
@@ -442,22 +439,14 @@ function sanitizePoolState(state: PoolStorageState): PoolStorageState {
       completedEvents: {}
     },
     sundayStandings: state.sundayStandings || {},
+    ...(state.missedPickPolicy ? { missedPickPolicy: state.missedPickPolicy } : {}),
     lastUpdated: state.lastUpdated || new Date().toISOString()
   };
 }
 
-// Temporal lockout evaluator
+// Temporal lockout evaluator (delegates to canonical rules engine)
 function isGameLockedByKickoff(game: Game, currentTime: number = Date.now()): boolean {
-  if (game.status === 'final' || game.status === 'in_progress') {
-    return true;
-  }
-  if (game.kickoffIso) {
-    const kickoffMs = new Date(game.kickoffIso).getTime();
-    if (!isNaN(kickoffMs) && currentTime >= kickoffMs) {
-      return true;
-    }
-  }
-  return false;
+  return isGameLockedAtTime(game, currentTime);
 }
 
 // Helper for ESPN Scoreboard URL supporting Regular Season (Weeks 1-18) & Postseason through Super Bowl (Weeks 19-22)
@@ -496,6 +485,19 @@ export function appendRunningAuditEntry(entry: {
         }
       } catch (e) {}
     }
+
+    const lastForContender = [...auditData.entries]
+      .reverse()
+      .find(e => e && e.contenderName === entry.contenderName);
+    if (
+      lastForContender &&
+      lastForContender.action === entry.action &&
+      String(lastForContender.tiebreaker ?? '') === String(entry.tiebreaker ?? '') &&
+      JSON.stringify(lastForContender.picks || {}) === JSON.stringify(entry.picks || {})
+    ) {
+      return;
+    }
+
     auditData.entries.push(entry);
     if (auditData.entries.length > 2000) {
       auditData.entries = auditData.entries.slice(-2000);
@@ -507,7 +509,14 @@ export function appendRunningAuditEntry(entry: {
 }
 
 export interface CertifiedGameLedgerEntry {
-  certifiedPicks?: Record<string, { actor?: string; isVegasDefault?: boolean; [key: string]: any }>;
+  gameNumber?: number;
+  matchup?: string;
+  kickoffIso?: string;
+  status?: string;
+  officialWinner?: string | null;
+  awayScore?: number;
+  homeScore?: number;
+  certifiedPicks: Record<string, CertifiedPickEntry>;
   [key: string]: any;
 }
 
@@ -535,27 +544,148 @@ export function loadCertifiedLedger(weekNumber: number): CertifiedWeekLedger {
   return fallback;
 }
 
+async function syncAutofilledSlotsToCloudSafely(
+  weekNumber: number,
+  gamesList: Game[],
+  autofilledSlots: Map<string, Record<number, string>>,
+  autofilledTiebreakers: Map<string, number>
+): Promise<void> {
+  if (!isFirebaseConfigured) return;
+  if (isFirestoreQuotaExhausted && Date.now() < quotaExhaustedRetryAfter) {
+    return;
+  }
+  const contenders = Array.from(new Set([...autofilledSlots.keys(), ...autofilledTiebreakers.keys()]));
+  if (contenders.length === 0) return;
+
+  const gameMap = new Map<number, Game>();
+  for (const g of gamesList) {
+    gameMap.set(g.gameNumber, g);
+  }
+
+  let ledgerHealed = false;
+  const ledgerPath = path.join(DATA_DIR, `week${weekNumber}-certified-ledger.json`);
+  const ledger = loadCertifiedLedger(weekNumber);
+
+  for (const cName of contenders) {
+    if (cName === 'Elvis') continue;
+    const proposedSlots = autofilledSlots.get(cName) || {};
+    const proposedTb = autofilledTiebreakers.get(cName);
+
+    try {
+      const existingSnap = await withTimeout(
+        getDoc(doc(db, 'picks', cName)),
+        3000,
+        null as any,
+        `Pre-autofill cloud verification (${cName})`
+      );
+
+      let existingCloudData: PlayerPickData | null = null;
+      if (existingSnap && typeof existingSnap.exists === 'function' && existingSnap.exists()) {
+        const parsed = existingSnap.data() as PlayerPickData;
+        if (parsed && parsed.week === weekNumber) {
+          existingCloudData = parsed;
+        }
+      }
+
+      const existingCloudPicks: Record<string, string> = { ...(existingCloudData?.picks || {}) };
+      const patchPicks: Record<string, string> = {};
+
+      for (const [gNumStr, vegasTeam] of Object.entries(proposedSlots)) {
+        const gNum = Number(gNumStr);
+        const game = gameMap.get(gNum);
+        const rawCloudTeam = existingCloudPicks[gNumStr] ?? (existingCloudPicks as any)[gNum];
+        const normCloudTeam = game && rawCloudTeam ? normalizeTeamPickForGame(game, rawCloudTeam) : null;
+
+        if (normCloudTeam) {
+          if (poolState?.picks?.[cName]) {
+            poolState.picks[cName].picks[gNum] = normCloudTeam;
+            if (existingCloudData?.submittedAt) {
+              poolState.picks[cName].submittedAt = existingCloudData.submittedAt;
+            }
+          }
+          const gCert = ledger.games[gNum];
+          if (gCert?.certifiedPicks) {
+            gCert.certifiedPicks[cName] = {
+              pickedTeam: normCloudTeam,
+              certifiedAtKickoff: gCert.certifiedPicks[cName]?.certifiedAtKickoff || game?.kickoffIso || new Date().toISOString(),
+              actor: 'contender',
+              isVegasDefault: false,
+              isCorrect: game?.officialWinner
+                ? (game.officialWinner === 'TIE' ? null : normCloudTeam.toLowerCase() === game.officialWinner.toLowerCase())
+                : null
+            };
+            ledgerHealed = true;
+          }
+          console.log(`[Autofill Guard] Shielded contender pick in Firestore for ${cName} Game ${gNum} (${normCloudTeam}); healed local ledger.`);
+        } else {
+          patchPicks[gNumStr] = vegasTeam;
+        }
+      }
+
+      const patchPayload: Record<string, any> = {
+        contenderName: cName,
+        week: weekNumber
+      };
+      let hasCloudPatch = false;
+
+      if (Object.keys(patchPicks).length > 0) {
+        patchPayload.picks = patchPicks;
+        hasCloudPatch = true;
+      }
+
+      const existingCloudTb = existingCloudData?.tiebreaker;
+      if (proposedTb !== undefined && (existingCloudTb === '' || existingCloudTb === undefined || existingCloudTb === null)) {
+        patchPayload.tiebreaker = proposedTb;
+        hasCloudPatch = true;
+      }
+
+      if (hasCloudPatch) {
+        await guardedServerCloudWrite(`picks/${cName}`, 'kickoff_vegas_autofill_slot', async () => {
+          await setDoc(doc(db, 'picks', cName), patchPayload, { merge: true });
+        }, 1);
+      }
+    } catch (err: any) {
+      console.warn(`[Autofill Guard] Safe cloud slot sync notice for ${cName}:`, err?.message || err);
+    }
+  }
+
+  if (ledgerHealed) {
+    try {
+      ledger.updatedAt = new Date().toISOString();
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), 'utf-8');
+      saveSafeWeekPicksArchive(weekNumber, poolState.picks);
+    } catch {}
+  }
+}
+
 export function certifyLockedGamePicks(
   weekNumber: number,
   gamesList: Game[],
   picksMap: Record<string, PlayerPickData>,
-  isAdminOverride = false
+  isAdminOverride = false,
+  options?: { allowAutofill?: boolean; missedPickPolicy?: MissedPickPolicy }
 ): void {
   try {
     const ledgerPath = path.join(DATA_DIR, `week${weekNumber}-certified-ledger.json`);
     const ledger = loadCertifiedLedger(weekNumber);
 
+    const allowAutofill = Boolean(options?.allowAutofill);
+    const missedPickPolicy: MissedPickPolicy =
+      options?.missedPickPolicy || poolState?.missedPickPolicy || 'vegas_autofill_human_priority';
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
     let changed = false;
-    const nowIso = new Date().toISOString();
     const activePlayers = (poolState?.players || INITIAL_PLAYERS).filter(p => p.isActive !== false);
-    const autofilledContenders = new Set<string>();
+    const autofilledSlots = new Map<string, Record<number, string>>();
+    const autofilledTiebreakers = new Map<string, number>();
 
     for (const g of gamesList) {
       if ((g.week || weekNumber) !== weekNumber) continue;
-      if (!isGameLockedByKickoff(g)) continue;
+      if (!isGameLockedAtTime(g, nowMs)) continue;
 
       const gNum = g.gameNumber;
-      const existingGameCert = ledger.games[gNum] || {
+      const existingGameCert: CertifiedGameLedgerEntry = ledger.games[gNum] || {
         gameNumber: gNum,
         matchup: `${g.awayTeam} @ ${g.homeTeam}`,
         kickoffIso: g.kickoffIso,
@@ -579,14 +709,31 @@ export function certifyLockedGamePicks(
         changed = true;
       }
 
+      const gameAutofillAllowed =
+        allowAutofill &&
+        isGameEligibleForAutofill(g, {
+          nowMs,
+          lastCloudSyncMs: lastSuccessfulCloudSyncMs,
+          cloudRequired: isFirebaseConfigured,
+          missedPickPolicy
+        });
+
+      const isMnfGame = Boolean(
+        g.isMNF ||
+        (g.day && g.day.toLowerCase().includes('mon')) ||
+        (gamesList.length > 0 && g.gameNumber === gamesList[gamesList.length - 1].gameNumber) ||
+        g.gameNumber === 16
+      );
+
       for (const p of activePlayers) {
         const cleanName = p.id === 'elvis' ? 'Elvis' : p.name;
-        let pickedTeam = picksMap[cleanName]?.picks?.[gNum];
+        const existingPickCert = existingGameCert.certifiedPicks[cleanName];
+        const rawPicked = picksMap[cleanName]?.picks?.[gNum];
+        let pickedTeam = normalizeTeamPickForGame(g, rawPicked) || (typeof rawPicked === 'string' && rawPicked.trim() ? rawPicked.trim() : null);
         let isAutofilledVegas = false;
 
-        // Autonomous Kickoff Default: If contender has no pick at kickoff, auto-assign Vegas Favorite
-        if (!pickedTeam) {
-          const vegasFav = g.favorite || g.homeTeam;
+        if (cleanName !== 'Elvis' && gameAutofillAllowed && !pickedTeam && !existingPickCert?.pickedTeam) {
+          const vegasFav = resolveGameFavorite(g);
           if (vegasFav) {
             pickedTeam = vegasFav;
             isAutofilledVegas = true;
@@ -596,8 +743,7 @@ export function certifyLockedGamePicks(
                 contenderName: cleanName,
                 picks: {},
                 tiebreaker: '',
-                week: weekNumber,
-                submittedAt: nowIso
+                week: weekNumber
               };
             }
             if (!picksMap[cleanName].picks) {
@@ -611,8 +757,7 @@ export function certifyLockedGamePicks(
                   contenderName: cleanName,
                   picks: {},
                   tiebreaker: '',
-                  week: weekNumber,
-                  submittedAt: nowIso
+                  week: weekNumber
                 };
               }
               if (!poolState.picks[cleanName].picks) {
@@ -627,58 +772,88 @@ export function certifyLockedGamePicks(
               contenderName: cleanName,
               picksCount: Object.keys(picksMap[cleanName].picks).length,
               picks: { [gNum]: vegasFav },
-              tiebreaker: picksMap[cleanName].tiebreaker,
+              tiebreaker: picksMap[cleanName].tiebreaker ?? '',
               actor: 'vegas_autofill',
               action: 'KICKOFF_AUTOFILL_VEGAS_FAVORITE'
             });
-            console.log(`[Kickoff Autofill] 🎰 Assigned Vegas Favorite (${vegasFav}) for ${cleanName} on Game ${gNum} (${g.awayTeam} @ ${g.homeTeam})`);
-            autofilledContenders.add(cleanName);
+            console.log(`[Kickoff Autofill] Assigned Vegas Favorite (${vegasFav}) for ${cleanName} on Game ${gNum} (${g.awayTeam} @ ${g.homeTeam})`);
+            autofilledSlots.set(cleanName, {
+              ...(autofilledSlots.get(cleanName) || {}),
+              [gNum]: vegasFav
+            });
             changed = true;
           }
         }
 
-        // Autonomous MNF Tiebreaker Default: If MNF kicks off and tiebreaker is still blank, assign Vegas Over/Under
-        const isMnfGame = Boolean(g.isMNF || (g.day && g.day.toLowerCase().includes('mon')) || (gamesList.length > 0 && g.gameNumber === gamesList[gamesList.length - 1].gameNumber) || g.gameNumber === 16);
-        if (isMnfGame) {
+        if (cleanName !== 'Elvis' && gameAutofillAllowed && isMnfGame) {
           const currentTb = picksMap[cleanName]?.tiebreaker;
           if (currentTb === '' || currentTb === undefined || currentTb === null) {
-            const defaultTb = (g.overUnder && g.overUnder > 0) ? Math.round(g.overUnder) : 45;
-            picksMap[cleanName].tiebreaker = defaultTb;
-            if (poolState?.picks?.[cleanName]) {
-              poolState.picks[cleanName].tiebreaker = defaultTb;
+            const defaultTb = resolveDefaultMnfTiebreaker(gamesList);
+            if (!picksMap[cleanName]) {
+              picksMap[cleanName] = { contenderName: cleanName, picks: {}, tiebreaker: defaultTb, week: weekNumber };
+            } else {
+              picksMap[cleanName].tiebreaker = defaultTb;
+            }
+            if (poolState?.picks) {
+              if (!poolState.picks[cleanName]) {
+                poolState.picks[cleanName] = { contenderName: cleanName, picks: {}, tiebreaker: defaultTb, week: weekNumber };
+              } else {
+                poolState.picks[cleanName].tiebreaker = defaultTb;
+              }
             }
             appendRunningAuditEntry({
               timestamp: nowIso,
               week: weekNumber,
               contenderName: cleanName,
-              picksCount: Object.keys(picksMap[cleanName].picks).length,
-              picks: picksMap[cleanName].picks,
+              picksCount: Object.keys(picksMap[cleanName].picks || {}).length,
+              picks: picksMap[cleanName].picks || {},
               tiebreaker: defaultTb,
               actor: 'vegas_autofill',
               action: 'KICKOFF_AUTOFILL_VEGAS_TIEBREAKER'
             });
-            console.log(`[Kickoff Autofill] 🎰 Assigned Vegas Over/Under (${defaultTb}) tiebreaker for ${cleanName} at MNF kickoff`);
-            autofilledContenders.add(cleanName);
+            console.log(`[Kickoff Autofill] Assigned Vegas Over/Under (${defaultTb}) tiebreaker for ${cleanName} at MNF kickoff`);
+            autofilledTiebreakers.set(cleanName, defaultTb);
             changed = true;
           }
         }
 
         if (!pickedTeam) continue;
 
-        const existingPickCert = existingGameCert.certifiedPicks[cleanName];
-        if (!existingPickCert || (isAdminOverride && existingPickCert.pickedTeam !== pickedTeam)) {
+        const incomingActor: PickActor = isAdminOverride
+          ? 'admin'
+          : isAutofilledVegas
+            ? 'vegas_autofill'
+            : existingPickCert?.actor === 'vegas_autofill' && existingPickCert.pickedTeam === pickedTeam && !picksMap[cleanName]?.submittedAt
+              ? 'vegas_autofill'
+              : cleanName === 'Elvis'
+                ? 'elvis'
+                : 'contender';
+
+        const existingSlot = existingPickCert
+          ? {
+              team: existingPickCert.pickedTeam,
+              actor: (existingPickCert.actor || (existingPickCert.isVegasDefault ? 'vegas_autofill' : (cleanName === 'Elvis' ? 'elvis' : 'contender'))) as PickActor
+            }
+          : null;
+
+        const shouldUpdateCert =
+          !existingPickCert ||
+          (shouldIncomingSlotWin(existingSlot, { team: pickedTeam, actor: incomingActor, submittedAt: picksMap[cleanName]?.submittedAt }, g) &&
+            (existingPickCert.pickedTeam !== pickedTeam || existingPickCert.actor !== incomingActor));
+
+        if (shouldUpdateCert) {
           existingGameCert.certifiedPicks[cleanName] = {
             pickedTeam,
             certifiedAtKickoff: existingPickCert?.certifiedAtKickoff || g.kickoffIso || nowIso,
             ...(isAdminOverride && existingPickCert ? { adminOverriddenAt: nowIso } : {}),
-            actor: isAdminOverride ? 'admin' : (isAutofilledVegas ? 'vegas_autofill' : (cleanName === 'Elvis' ? 'elvis' : 'contender')),
-            isVegasDefault: isAutofilledVegas || existingPickCert?.isVegasDefault || false,
+            actor: incomingActor,
+            isVegasDefault: incomingActor === 'vegas_autofill',
             isCorrect: g.officialWinner
               ? (g.officialWinner === 'TIE' ? null : pickedTeam.toLowerCase() === g.officialWinner.toLowerCase())
               : null
           };
           changed = true;
-        } else if (g.officialWinner && existingPickCert.isCorrect === null && g.officialWinner !== 'TIE') {
+        } else if (g.officialWinner && existingPickCert && existingPickCert.isCorrect === null && g.officialWinner !== 'TIE') {
           existingPickCert.isCorrect = existingPickCert.pickedTeam.toLowerCase() === g.officialWinner.toLowerCase();
           changed = true;
         }
@@ -699,21 +874,10 @@ export function certifyLockedGamePicks(
           fs.renameSync(tempFile, activeStorageFile);
         } catch (e) {}
 
-        // Immediately sync any kickoff Vegas autofilled contender sheets to Cloud Firestore
-        // so real-time browser listeners display the autofilled picks and never revert them.
-        if (autofilledContenders.size > 0 && !isFirestoreQuotaExhausted) {
-          for (const cName of autofilledContenders) {
-            if (cName === 'Elvis') continue;
-            const cRecord = poolState.picks[cName];
-            if (cRecord && Object.keys(cRecord.picks || {}).length > 0) {
-              const safeRecord = JSON.parse(JSON.stringify({ ...cRecord, week: weekNumber }));
-              guardedServerCloudWrite(`picks/${cName}`, 'kickoff_vegas_autofill', async () => {
-                await setDoc(doc(db, 'picks', cName), safeRecord);
-              }, 1).catch(err => {
-                console.warn(`[Kickoff Autofill] Cloud sync notice for ${cName}:`, err?.message || err);
-              });
-            }
-          }
+        if (autofilledSlots.size > 0 || autofilledTiebreakers.size > 0) {
+          syncAutofilledSlotsToCloudSafely(weekNumber, gamesList, autofilledSlots, autofilledTiebreakers).catch(err => {
+            console.warn('[Kickoff Autofill] Safe cloud slot sync warning:', err?.message || err);
+          });
         }
       }
     }
@@ -738,9 +902,9 @@ export function saveSafeWeekPicksArchive(weekNumber: number, currentPicks: Recor
     for (const [name, pData] of Object.entries(currentPicks || {})) {
       if (pData && pData.week === weekNumber) {
         const incomingCount = Object.keys(pData.picks || {}).length;
-        const existingCount = Object.keys(existingArchive[name]?.picks || {}).length;
-        if (incomingCount > 0 && incomingCount >= existingCount) {
+        if (incomingCount > 0) {
           mergedArchive[name] = {
+            ...existingArchive[name],
             ...pData,
             picks: { ...(existingArchive[name]?.picks || {}), ...(pData.picks || {}) },
             week: weekNumber
@@ -768,17 +932,15 @@ export function getEffectivePicksForWeek(
   weekNumber: number,
   livePicks: Record<string, PlayerPickData>
 ): Record<string, PlayerPickData> {
-  const effective: Record<string, PlayerPickData> = {};
   const archivePath = path.join(DATA_DIR, `week${weekNumber}-picks-archive.json`);
-  const ledgerPath = path.join(DATA_DIR, `week${weekNumber}-certified-ledger.json`);
+  let archivedPicks: Record<string, PlayerPickData> = {};
 
-  // 1. Load from disk archive for weekNumber first
   if (fs.existsSync(archivePath)) {
     try {
       const archived = JSON.parse(fs.readFileSync(archivePath, 'utf-8')) || {};
       for (const [name, pData] of Object.entries(archived) as [string, any][]) {
         if (pData && pData.picks && Object.keys(pData.picks).length > 0) {
-          effective[name] = {
+          archivedPicks[name] = {
             contenderName: name,
             picks: { ...pData.picks },
             tiebreaker: pData.tiebreaker ?? '',
@@ -790,42 +952,14 @@ export function getEffectivePicksForWeek(
     } catch (e) {}
   }
 
-  // 2. Overlay certified kickoff ledger for weekNumber
-  if (fs.existsSync(ledgerPath)) {
-    try {
-      const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8')) || {};
-      if (ledger.games && typeof ledger.games === 'object') {
-        for (const [gNumStr, gCert] of Object.entries(ledger.games) as [string, any][]) {
-          const gNum = Number(gNumStr);
-          if (gCert && gCert.certifiedPicks) {
-            for (const [name, cPick] of Object.entries(gCert.certifiedPicks) as [string, any][]) {
-              if (cPick && cPick.pickedTeam) {
-                if (!effective[name]) {
-                  effective[name] = { contenderName: name, picks: {}, tiebreaker: '', week: weekNumber };
-                }
-                effective[name].picks[gNum] = cPick.pickedTeam;
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 3. Overlay live memory picks ONLY if they belong to weekNumber and are non-empty
-  for (const [name, pData] of Object.entries(livePicks || {})) {
-    if (pData && pData.week === weekNumber && Object.keys(pData.picks || {}).length > 0) {
-      effective[name] = {
-        contenderName: name,
-        picks: { ...(effective[name]?.picks || {}), ...(pData.picks || {}) },
-        tiebreaker: pData.tiebreaker !== undefined && pData.tiebreaker !== '' ? pData.tiebreaker : (effective[name]?.tiebreaker ?? ''),
-        submittedAt: pData.submittedAt || effective[name]?.submittedAt,
-        week: weekNumber
-      };
-    }
-  }
-
-  return effective;
+  const ledger = loadCertifiedLedger(weekNumber);
+  return mergeAuthoritativeWeekPicks({
+    weekNumber,
+    games: poolState?.games || [],
+    livePicks,
+    archivedPicks,
+    ledgerGames: ledger.games
+  });
 }
 
 // Read pool state from active league disk file, or initialize if missing
@@ -852,6 +986,7 @@ function loadPoolState(): PoolStorageState {
 
 let isFirestoreQuotaExhausted = false;
 let quotaExhaustedRetryAfter = 0;
+let lastSuccessfulCloudSyncMs: number | null = null;
 
 // Save pool state safely to active league storage file
 async function savePoolState(state: PoolStorageState, syncPicksToCloud = false): Promise<void> {
@@ -1046,12 +1181,6 @@ async function syncFromCloud(): Promise<boolean> {
     }
 
     const activeWeek = poolState.games?.find(g => typeof g.week === 'number' && g.week > 0)?.week || poolState.games?.[0]?.week || 6;
-    const earliestKickoffMs = Math.min(
-      ...(poolState.games || [])
-        .map(g => (g.kickoffIso ? new Date(g.kickoffIso).getTime() : NaN))
-        .filter(ms => !isNaN(ms))
-    );
-    const isBeforeElvisWindow = Number.isFinite(earliestKickoffMs) && (earliestKickoffMs - Date.now() > 60 * 60 * 1000);
     const picksSnap = await withTimeout(
       getDocs(collection(db, 'picks')),
       4000,
@@ -1059,146 +1188,118 @@ async function syncFromCloud(): Promise<boolean> {
       'Picks collection sync'
     );
 
-    if (picksSnap && !picksSnap.empty) {
-      // Re-initialize picks strictly for current registered players
-      const freshPicks: Record<string, PlayerPickData> = {};
-      (poolState.players || INITIAL_PLAYERS).forEach(p => {
-        const cleanName = p.id === 'elvis' ? 'Elvis' : p.name;
-        // Elvis picks are maintained purely in local storage; preserve existing memory picks across cloud sync
-        if (cleanName === 'Elvis' && poolState.picks['Elvis'] && poolState.picks['Elvis'].picks && Object.keys(poolState.picks['Elvis'].picks).length > 0) {
-          freshPicks['Elvis'] = { ...poolState.picks['Elvis'] };
-        } else {
-          freshPicks[cleanName] = {
-            contenderName: cleanName,
-            picks: {},
-            tiebreaker: '',
-            week: activeWeek
-          };
-        }
-      });
+    const registeredRoster = new Set<string>();
+    (poolState.players || INITIAL_PLAYERS).forEach(p => {
+      const cleanName = p.id === 'elvis' ? 'Elvis' : p.name;
+      registeredRoster.add(cleanName);
+    });
 
-      let updatedCount = 0;
-      picksSnap.forEach(d => {
-        const data = d.data() as PlayerPickData;
-        const name = d.id;
-        // Reject legacy lowercase document IDs (e.g. 'trevor', 'marcio' from Week 2/3) or non-roster keys
-        if (!freshPicks[name]) {
-          return;
-        }
-        // Reject stale cross-week pick documents (strictly require week === activeWeek)
-        if (!data || data.week !== activeWeek) {
-          return;
-        }
-        // Elvis picks are maintained purely in local server storage and never touched in Firestore
-        if (name === 'Elvis') {
-          return;
-        }
-        if (data && data.picks && typeof data.picks === 'object') {
-          // Validate whole pick sheet against current active week's games:
-          // If ANY game entry belongs to a different week's matchup, reject the entire document
-          // so colliding game slots (e.g. Game 5 Lions, Game 14 Bears) and stale tiebreakers never leak.
-          const validPicks: Record<number, string> = {};
-          let hasCrossWeekMismatch = false;
-          for (const [gNumStr, team] of Object.entries(data.picks)) {
-            const gNum = parseInt(gNumStr, 10);
-            if (isNaN(gNum) || typeof team !== 'string' || !team.trim()) continue;
-            const game = poolState.games?.find(g => g.gameNumber === gNum);
-            if (!game) {
-              hasCrossWeekMismatch = true;
-              break;
-            }
-            const away = game.awayTeam.toLowerCase();
-            const home = game.homeTeam.toLowerCase();
-            const picked = team.toLowerCase();
-            if (away.includes(picked) || picked.includes(away)) {
-              validPicks[gNum] = game.awayTeam;
-            } else if (home.includes(picked) || picked.includes(home)) {
-              validPicks[gNum] = game.homeTeam;
-            } else {
-              hasCrossWeekMismatch = true;
-              break;
-            }
+    const cloudPicks: Record<string, PlayerPickData> = {};
+    let updatedCount = 0;
+
+    if (picksSnap) {
+      lastSuccessfulCloudSyncMs = Date.now();
+      if (!picksSnap.empty) {
+        picksSnap.forEach((d: any) => {
+          const data = d.data() as PlayerPickData;
+          const name = d.id;
+          // Reject legacy lowercase document IDs or non-roster keys, and keep Elvis strictly local
+          if (!registeredRoster.has(name) || name === 'Elvis') {
+            return;
           }
+          // Reject stale cross-week pick documents (strictly require week === activeWeek)
+          if (!data || data.week !== activeWeek) {
+            return;
+          }
+          if (data && data.picks && typeof data.picks === 'object') {
+            // Validate whole pick sheet against current active week's games so stale matchups never leak
+            const validPicks: Record<number, string> = {};
+            let hasCrossWeekMismatch = false;
+            for (const [gNumStr, team] of Object.entries(data.picks)) {
+              const gNum = parseInt(gNumStr, 10);
+              if (isNaN(gNum) || typeof team !== 'string' || !team.trim()) continue;
+              const game = poolState.games?.find(g => g.gameNumber === gNum);
+              if (!game) {
+                hasCrossWeekMismatch = true;
+                break;
+              }
+              const normalized = normalizeTeamPickForGame(game, team);
+              if (!normalized) {
+                hasCrossWeekMismatch = true;
+                break;
+              }
+              validPicks[gNum] = normalized;
+            }
 
-          if (!hasCrossWeekMismatch && Object.keys(validPicks).length > 0) {
-            const prevLocalCount = Object.keys(poolState.picks?.[name]?.picks || {}).length;
-            const incomingCount = Object.keys(validPicks).length;
-            const prevSubmittedAt = poolState.picks?.[name]?.submittedAt;
-            const incomingSubmittedAt = data.submittedAt || prevSubmittedAt || new Date().toISOString();
+            if (!hasCrossWeekMismatch && Object.keys(validPicks).length > 0) {
+              const prevLocal = poolState.picks?.[name];
+              const prevLocalCount = Object.keys(prevLocal?.picks || {}).length;
+              const incomingCount = Object.keys(validPicks).length;
+              const prevSubmittedAt = prevLocal?.submittedAt;
+              const effectiveSubmittedAt = data.submittedAt || prevSubmittedAt;
 
-            freshPicks[name] = {
-              contenderName: name,
-              picks: validPicks,
-              tiebreaker: data.tiebreaker ?? '',
-              submittedAt: incomingSubmittedAt,
-              week: activeWeek
-            };
-            updatedCount++;
-
-            if (incomingCount > prevLocalCount || (data.submittedAt && data.submittedAt !== prevSubmittedAt && incomingCount >= prevLocalCount)) {
-              appendRunningAuditEntry({
-                timestamp: incomingSubmittedAt,
-                week: activeWeek,
+              cloudPicks[name] = {
                 contenderName: name,
-                picksCount: incomingCount,
                 picks: validPicks,
                 tiebreaker: data.tiebreaker ?? '',
-                actor: 'contender',
-                action: 'CLOUD_SYNC_SUBMIT_PICKS'
-              });
+                ...(effectiveSubmittedAt ? { submittedAt: effectiveSubmittedAt } : {}),
+                week: activeWeek
+              };
+              updatedCount++;
+
+              if (incomingCount > prevLocalCount || (data.submittedAt && data.submittedAt !== prevSubmittedAt && incomingCount >= prevLocalCount)) {
+                appendRunningAuditEntry({
+                  timestamp: effectiveSubmittedAt || new Date().toISOString(),
+                  week: activeWeek,
+                  contenderName: name,
+                  picksCount: incomingCount,
+                  picks: validPicks,
+                  tiebreaker: data.tiebreaker ?? '',
+                  actor: 'contender',
+                  action: 'CLOUD_SYNC_SUBMIT_PICKS'
+                });
+              }
             }
           }
-        }
-      });
-
-      // Self-heal: if any contender has missing picks in cloud or an admin/kickoff-certified pick differs from cloud, reconcile!
-      const archivedEffective = getEffectivePicksForWeek(activeWeek, {});
-      let certLedger: { week: number; updatedAt: string; games: Record<number, any> } | null = null;
-      const certLedgerPath = path.join(DATA_DIR, `week${activeWeek}-certified-ledger.json`);
-      if (fs.existsSync(certLedgerPath)) {
-        try {
-          certLedger = JSON.parse(fs.readFileSync(certLedgerPath, 'utf-8'));
-        } catch (e) {}
+        });
       }
-
-      for (const [archName, archData] of Object.entries(archivedEffective)) {
-        if (archName === 'Elvis') continue;
-        const localMemoryPicks = poolState.picks[archName]?.picks || {};
-        const cloudPicks = freshPicks[archName]?.picks || {};
-        const archPicks = archData?.picks || {};
-        const cloudCount = Object.keys(cloudPicks).length;
-        const archCount = Math.max(Object.keys(archPicks).length, Object.keys(localMemoryPicks).length);
-
-        let needsCloudHeal = archCount > cloudCount;
-        const mergedPicks: Record<string, string> = { ...cloudPicks, ...archPicks, ...localMemoryPicks };
-
-        // Enforce admin-certified and kickoff Vegas-autofilled picks over stale cloud entries
-        if (certLedger && certLedger.games) {
-          for (const [gNum, gCert] of Object.entries(certLedger.games)) {
-            const cPick = gCert?.certifiedPicks?.[archName];
-            if (cPick && (cPick.actor === 'admin' || cPick.actor === 'vegas_autofill') && cPick.pickedTeam && mergedPicks[gNum] !== cPick.pickedTeam) {
-              mergedPicks[gNum] = cPick.pickedTeam;
-              needsCloudHeal = true;
-            }
-          }
-        }
-
-        if (needsCloudHeal) {
-          freshPicks[archName] = {
-            ...archData,
-            ...(freshPicks[archName] || {}),
-            contenderName: archName,
-            picks: mergedPicks,
-            tiebreaker: freshPicks[archName]?.tiebreaker || archData.tiebreaker || '',
-            week: activeWeek
-          };
-          if (cloudCount === 0) updatedCount++;
-        }
-      }
-
-      poolState.picks = freshPicks;
-      console.log(`[Firebase Sync] Cloud sync: Loaded ${updatedCount} active contenders from Firestore into server storage.`);
     } else {
+      console.log('[Firebase Sync] Firestore picks collection sync timed out or returned null; keeping local/archived picks.');
+    }
+
+    const archivedEffective = getEffectivePicksForWeek(activeWeek, {});
+    const certLedger = loadCertifiedLedger(activeWeek);
+    const mergedRosterPicks = mergeAuthoritativeWeekPicks({
+      weekNumber: activeWeek,
+      games: poolState.games || [],
+      livePicks: poolState.picks || {},
+      archivedPicks: archivedEffective,
+      cloudPicks,
+      ledgerGames: certLedger?.games || {}
+    });
+
+    const freshPicks: Record<string, PlayerPickData> = {};
+    registeredRoster.forEach(cleanName => {
+      if (cleanName === 'Elvis') {
+        const existingElvis = poolState.picks?.['Elvis'];
+        freshPicks['Elvis'] =
+          existingElvis && existingElvis.picks && Object.keys(existingElvis.picks).length > 0
+            ? { ...existingElvis, contenderName: 'Elvis', week: activeWeek }
+            : { contenderName: 'Elvis', picks: {}, tiebreaker: '', week: activeWeek };
+        return;
+      }
+      freshPicks[cleanName] = mergedRosterPicks[cleanName] || {
+        contenderName: cleanName,
+        picks: {},
+        tiebreaker: '',
+        week: activeWeek
+      };
+    });
+
+    poolState.picks = freshPicks;
+    if (picksSnap && !picksSnap.empty) {
+      console.log(`[Firebase Sync] Cloud sync: Loaded ${updatedCount} active contenders from Firestore into server storage.`);
+    } else if (picksSnap) {
       console.log('[Firebase Sync] Firestore picks collection is currently empty.');
     }
 
@@ -1252,7 +1353,7 @@ async function syncFromCloud(): Promise<boolean> {
     // Save the newly synced state to disk
     const sanitized = sanitizePoolState(poolState);
     fs.writeFileSync(getActiveStorageFile(), JSON.stringify(sanitized, null, 2), 'utf-8');
-    return true;
+    return Boolean(picksSnap);
   } catch (err) {
     console.error('[Firebase Sync] Critical error during cloud sync:', err);
   }
@@ -1853,7 +1954,10 @@ export async function runMasterClockTick(): Promise<void> {
         hasCompletedInitialCloudSync = true;
         const syncedWeek = poolState.games?.find(g => typeof g.week === 'number' && g.week > 0)?.week || activeWeek;
         saveSafeWeekPicksArchive(syncedWeek, poolState.picks);
-        certifyLockedGamePicks(syncedWeek, poolState.games || [], poolState.picks);
+        certifyLockedGamePicks(syncedWeek, poolState.games || [], poolState.picks, false, {
+          allowAutofill: false,
+          missedPickPolicy: poolState.missedPickPolicy
+        });
       }
     }
 
@@ -1896,9 +2000,6 @@ export async function runMasterClockTick(): Promise<void> {
     const refreshedGames = poolState.games || games;
     const livePulse = evaluateLeaguePulse(refreshedGames);
 
-    // Certify any games that have reached kickoff into the Per-Game Certified Kickoff Ledger
-    certifyLockedGamePicks(activeWeek, refreshedGames, poolState.picks);
-
     // -------------------------------------------------------------
     // TRIGGER 0: Autonomous NFL Team Win-Loss Records & Lines Sync
     // Verifies and auto-populates live NFL team records on all pick cards
@@ -1914,10 +2015,8 @@ export async function runMasterClockTick(): Promise<void> {
     }
 
     // -------------------------------------------------------------
-    // TRIGGER 1: Autonomous Elvis Vegas Favorites (Dynamic 1-Hour Pre-Kickoff Window)
-    // Elvis resets to a clean sheet with everyone else on the Midnight After MNF reset.
-    // Vegas favorites are entered 1 hour prior to TNF or the first game of the official week
-    // (supporting Wednesday, Thursday, Friday, or Saturday openers).
+    // TRIGGER 1: Autonomous Elvis Vegas Favorites (Run BEFORE kickoff ledger certification)
+    // Elvis is stamped with actor: 'elvis' before human kickoff autofill runs.
     // -------------------------------------------------------------
     const elvisEventKey = `elvis-vegas-picks-week-${activeWeek}`;
     const elvisPicksRecord = poolState.picks['Elvis'];
@@ -1944,7 +2043,7 @@ export async function runMasterClockTick(): Promise<void> {
 
     if (isKickoffApproaching && !isElvisAlreadyStaged && (!poolState.clockLedger.completedEvents[elvisEventKey] || elvisPickCount < refreshedGames.length)) {
       console.log(`[Master Clock] ⏰ Trigger: Populating Elvis Vegas favorites for Week ${activeWeek} (1-hour pre-kickoff window)...`);
-      const elvisFavorites = getElvisVegasFavorites(refreshedGames);
+      const elvisFavorites = buildElvisPickSheet(refreshedGames);
       poolState.picks['Elvis'] = elvisFavorites;
       appendRunningAuditEntry({
         timestamp: new Date().toISOString(),
@@ -1960,6 +2059,28 @@ export async function runMasterClockTick(): Promise<void> {
       await savePoolState(poolState, false);
       console.log(`[Master Clock] ✓ Elvis picks populated and saved to local server storage.`);
     }
+
+    // Mandatory Fresh Pre-Autofill Cloud Pull whenever any locked game needs missing-slot evaluation
+    const activeHumans = (poolState.players || INITIAL_PLAYERS).filter(p => p.isActive !== false && p.id !== 'elvis' && p.name !== 'Elvis');
+    const activePolicy: MissedPickPolicy = poolState.missedPickPolicy || 'vegas_autofill_human_priority';
+    if (isFirebaseConfigured && activePolicy !== 'no_autofill_zero') {
+      const needsFreshCloudSyncForKickoff = refreshedGames.some(g => {
+        if ((g.week || activeWeek) !== activeWeek || !isGameLockedAtTime(g)) return false;
+        const gKickMs = g.kickoffIso ? new Date(g.kickoffIso).getTime() : NaN;
+        const hasAnyMissingHuman = activeHumans.some(p => !poolState.picks?.[p.name]?.picks?.[g.gameNumber]);
+        if (!hasAnyMissingHuman) return false;
+        return lastSuccessfulCloudSyncMs === null || (!isNaN(gKickMs) && lastSuccessfulCloudSyncMs < gKickMs);
+      });
+
+      if (needsFreshCloudSyncForKickoff) {
+        await syncFromCloud();
+      }
+    }
+
+    certifyLockedGamePicks(activeWeek, refreshedGames, poolState.picks, false, {
+      allowAutofill: !isFirebaseConfigured || lastSuccessfulCloudSyncMs !== null,
+      missedPickPolicy: activePolicy
+    });
 
     // -------------------------------------------------------------
     // TRIGGER 2: Autonomous Dispatch Generation (Decoupled & Idempotent)
@@ -2049,7 +2170,10 @@ export async function runMasterClockTick(): Promise<void> {
     if (hasActiveWeekCommenced && isMnfConcluded && !poolState.clockLedger.completedEvents[mnfCompileKey]) {
       console.log(`[Master Clock] ⏰ MNF Concluded for Week ${activeWeek}: Archiving picks & compiling official Week ${activeWeek} winner for Podium spotlight...`);
       saveSafeWeekPicksArchive(activeWeek, poolState.picks);
-      certifyLockedGamePicks(activeWeek, refreshedGames, poolState.picks);
+      certifyLockedGamePicks(activeWeek, refreshedGames, poolState.picks, false, {
+        allowAutofill: !isFirebaseConfigured || lastSuccessfulCloudSyncMs !== null,
+        missedPickPolicy: poolState.missedPickPolicy
+      });
       autoCompileWeekResults(activeWeek);
       poolState.clockLedger.completedEvents[mnfCompileKey] = new Date().toISOString();
       await savePoolState(poolState, false);
@@ -2899,7 +3023,7 @@ app.delete('/api/dispatches/:id', async (req, res) => {
 
 // Save or override contender picks globally
 app.post('/api/picks', async (req, res) => {
-  const { contenderName, picks, tiebreaker, adminOverride } = req.body;
+  const { contenderName, picks, tiebreaker, adminOverride, allowClearUnlocked } = req.body;
   if (!contenderName) {
     return res.status(400).json({ error: 'contenderName is required' });
   }
@@ -2910,38 +3034,27 @@ app.post('/api/picks', async (req, res) => {
 
   const existingPicks = poolState.picks[contenderName]?.picks || {};
   const incomingPicks = picks || {};
-  const mergedPicks = {
-    ...existingPicks,
-    ...incomingPicks
-  };
 
-  console.log(`[API POST /api/picks] Contender: ${contenderName} (adminOverride: ${Boolean(adminOverride)})`);
-  console.log(`  - Incoming Picks: ${Object.keys(incomingPicks).length}`);
-  console.log(`  - Existing Picks: ${Object.keys(existingPicks).length}`);
-  console.log(`  - Merged Total: ${Object.keys(mergedPicks).length}`);
-  
-  // Guard against accidental empty overwrites for all contenders
-  if (Object.keys(incomingPicks).length === 0 && Object.keys(existingPicks).length > 0) {
+  // Guard against accidental empty overwrites unless explicitly clearing unlocked slots or admin override
+  if (!adminOverride && !allowClearUnlocked && Object.keys(incomingPicks).length === 0 && Object.keys(existingPicks).length > 0) {
     console.warn(`[API WARNING] Received EMPTY picks for ${contenderName}. Preserving existing ${Object.keys(existingPicks).length} picks.`);
     return res.json({ success: true, picks: poolState.picks, message: 'Existing picks preserved' });
   }
 
-  // Enforce temporal kickoff lockout (unless explicitly overridden by admin)
-  if (!adminOverride) {
-    for (const [gNumStr, team] of Object.entries(incomingPicks)) {
-      const gNum = Number(gNumStr);
-      const targetGame = poolState.games.find(g => g.gameNumber === gNum);
-      if (targetGame && isGameLockedByKickoff(targetGame)) {
-        if (existingPicks[gNum] && existingPicks[gNum] !== team) {
-          console.warn(`[Lockout] Blocked pick modification for ${contenderName} on Game ${gNum} (${targetGame.awayTeam} vs ${targetGame.homeTeam}) - Game already kicked off`);
-          mergedPicks[gNum] = existingPicks[gNum];
-        } else if (!existingPicks[gNum]) {
-          console.warn(`[Lockout] Blocked late pick entry for ${contenderName} on Game ${gNum} (${targetGame.awayTeam} vs ${targetGame.homeTeam}) - Game already kicked off`);
-          delete mergedPicks[gNum];
-        }
-      }
-    }
+  const mergedPicks = sanitizeClientSubmissionPicks(existingPicks, incomingPicks, poolState.games || [], {
+    adminOverride: Boolean(adminOverride),
+    allowClearUnlocked: Boolean(allowClearUnlocked)
+  });
+
+  if (!adminOverride && !allowClearUnlocked && Object.keys(mergedPicks).length === 0 && Object.keys(existingPicks).length > 0) {
+    console.warn(`[API WARNING] Blocked post-kickoff empty collapse for ${contenderName}. Preserving ${Object.keys(existingPicks).length} picks.`);
+    return res.json({ success: true, picks: poolState.picks, message: 'Existing picks preserved' });
   }
+
+  console.log(`[API POST /api/picks] Contender: ${contenderName} (adminOverride: ${Boolean(adminOverride)}, allowClearUnlocked: ${Boolean(allowClearUnlocked)})`);
+  console.log(`  - Incoming Picks: ${Object.keys(incomingPicks).length}`);
+  console.log(`  - Existing Picks: ${Object.keys(existingPicks).length}`);
+  console.log(`  - Merged Total: ${Object.keys(mergedPicks).length}`);
 
   const serverTime = new Date().toISOString();
   const activeWeek = poolState.games?.find(g => typeof g.week === 'number' && g.week > 0)?.week || poolState.games?.[0]?.week || 6;
@@ -2967,8 +3080,11 @@ app.post('/api/picks', async (req, res) => {
     action: adminOverride ? 'ADMIN_OVERRIDE_PICKS' : 'SUBMIT_PICKS'
   });
 
-  // Safeguard Layer 2: Update Certified Kickoff Ledger & Safe Archive
-  certifyLockedGamePicks(activeWeek, poolState.games || [], poolState.picks, Boolean(adminOverride));
+  // Safeguard Layer 2: Certify submitted slots only (never autofill unrelated contenders during a pick submit)
+  certifyLockedGamePicks(activeWeek, poolState.games || [], poolState.picks, Boolean(adminOverride), {
+    allowAutofill: false,
+    missedPickPolicy: poolState.missedPickPolicy
+  });
   saveSafeWeekPicksArchive(activeWeek, poolState.picks);
 
   // If Admin overrode a pick on an already-compiled week, re-compile standings immediately
@@ -2977,10 +3093,13 @@ app.post('/api/picks', async (req, res) => {
   }
 
   // Persist to cloud Firestore with non-blocking timeout & circuit breaker
-  if (!isFirestoreQuotaExhausted) {
+  if (isFirebaseConfigured && !isFirestoreQuotaExhausted) {
     try {
+      const writeOptions = (adminOverride || allowClearUnlocked)
+        ? { mergeFields: ['contenderName', 'picks', 'tiebreaker', 'submittedAt', 'week'] }
+        : { merge: true };
       await guardedServerCloudWrite(`picks/${contenderName}`, 'api_submit_pick', async () => {
-        const cloudPromise = setDoc(doc(db, 'picks', contenderName), newPickRecord);
+        const cloudPromise = setDoc(doc(db, 'picks', contenderName), newPickRecord, writeOptions);
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Firestore write timeout after 2500ms')), 2500)
         );
@@ -3158,12 +3277,15 @@ function autoCompileWeekResults(weekNumber: number = 2, overrideWinner?: string)
     : (weekNumber === 2 ? ['Marcio'] : (topWeekContenders.length > 0 ? [topWeekContenders[0].name] : ['Marcio']));
 
   if (!overrideWinner && topWeekContenders.length > 1) {
-    // House Rule: If any contender tied at maxWins submitted manual picks (not Elvis and not 100% vegas_autofill),
-    // manual submitters take priority over auto-generated sheets for the weekly crown.
-    // If NONE of the contenders at maxWins manually submitted, all contenders at maxWins compete on the tiebreaker.
+    // Respect configured missedPickPolicy:
+    // - vegas_autofill_human_priority: manual submitters take priority over auto-generated sheets
+    // - vegas_autofill_equal_standing: all human contenders compete equally on tiebreaker
+    // - no_autofill_zero: unpicked games stayed 0 pts so all tied contenders compete cleanly on tiebreaker
+    const activePolicy: MissedPickPolicy = poolState.missedPickPolicy || 'vegas_autofill_human_priority';
     const ledger = loadCertifiedLedger(weekNumber);
     const isAutoGeneratedContender = (name: string): boolean => {
       if (name === 'Elvis') return true;
+      if (activePolicy === 'vegas_autofill_equal_standing') return false;
       const gameEntries = Object.values(ledger.games || {});
       if (gameEntries.length === 0) return false;
       const contenderCerts = gameEntries.map(g => g.certifiedPicks?.[name]).filter((c): c is NonNullable<typeof c> => Boolean(c));
@@ -3451,14 +3573,20 @@ export async function executeTuesdayCyclePipeline(targetWeek?: number, overrideW
     console.warn(`[Tuesday Pipeline] Pre-rollover cloud sync notice:`, sErr.message);
   }
 
-  // Stage 0B: Safeguard current week picks & certified ledger BEFORE any score compilation or rollover
+  // Stage 0B: Safeguard current week picks & certify locked games safely before rollover
   saveSafeWeekPicksArchive(currentWeek, poolState.picks);
-  certifyLockedGamePicks(currentWeek, poolState.games || [], poolState.picks);
+  certifyLockedGamePicks(currentWeek, poolState.games || [], poolState.picks, false, {
+    allowAutofill: !isFirebaseConfigured || lastSuccessfulCloudSyncMs !== null,
+    missedPickPolicy: poolState.missedPickPolicy
+  });
 
   // Stage 1: Ingest authoritative ESPN scores & verify MNF
   console.log(`[Tuesday Pipeline] [Stage 1/7] Ingesting final live NFL scoreboard for Week ${currentWeek}...`);
   await scrapeAndIngestLiveNflScores(currentWeek);
-  certifyLockedGamePicks(currentWeek, poolState.games || [], poolState.picks);
+  certifyLockedGamePicks(currentWeek, poolState.games || [], poolState.picks, false, {
+    allowAutofill: !isFirebaseConfigured || lastSuccessfulCloudSyncMs !== null,
+    missedPickPolicy: poolState.missedPickPolicy
+  });
 
   // Stage 2: Crown weekly winner & freeze scores to Historical Vault
   console.log(`[Tuesday Pipeline] [Stage 2/7] Compiling standings, awarding weekly crown & freezing into Vault...`);
@@ -3756,10 +3884,23 @@ app.delete('/api/messages/:id', async (req, res) => {
 
 // Auto-generate or refresh Elvis picks using Vegas Insider Favorites
 app.post('/api/elvis/generate-picks', async (_req, res) => {
-  const elvisPicks = getElvisVegasFavorites(poolState.games || INITIAL_GAMES);
+  const gamesList = poolState.games || INITIAL_GAMES;
+  const activeWeek = gamesList.find(g => typeof g.week === 'number' && g.week > 0)?.week || gamesList[0]?.week || 6;
+  const elvisPicks = buildElvisPickSheet(gamesList);
   poolState.picks['Elvis'] = elvisPicks;
+  appendRunningAuditEntry({
+    timestamp: elvisPicks.submittedAt || new Date().toISOString(),
+    week: activeWeek,
+    contenderName: 'Elvis',
+    picksCount: Object.keys(elvisPicks.picks || {}).length,
+    picks: elvisPicks.picks || {},
+    tiebreaker: elvisPicks.tiebreaker ?? '',
+    actor: 'elvis',
+    action: 'MANUAL_ELVIS_VEGAS_FAVORITES'
+  });
+  certifyLockedGamePicks(activeWeek, gamesList, poolState.picks, false, { allowAutofill: false });
   await savePoolState(poolState, false);
-  console.log('[Elvis API] ✓ Elvis picks generated and saved to local server storage.');
+  console.log('[Elvis API] ✓ Elvis picks generated, certified as actor=elvis, and saved to local server storage.');
   res.json({ success: true, elvisPicks, picks: poolState.picks });
 });
 

@@ -41,6 +41,7 @@ import {
 } from 'lucide-react';
 import { Game, Player, PlayerPickData, SeasonHistory, WeeklyDispatch } from '../types';
 import { formatTeamCityOrRegion } from '../utils/nflTeamThemes';
+import { applyBlankOnlyFavorites, resolveDefaultMnfTiebreaker } from '../utils/pickRulesEngine';
 import { WeeklyAuditSection } from './WeeklyAuditSection';
 import { AdminPinGate } from './AdminPinGate';
 import { isAdminPinUnlocked, setAdminPinUnlocked } from '../utils/adminAuth';
@@ -895,26 +896,25 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
   };
 
   const handleFillVegasFavorites = () => {
-    const vegasPicks: Record<number, string> = { ...editingPicks };
-    const hasUnpickedGames = games.some(g => !vegasPicks[g.gameNumber]);
-    games.forEach(g => {
-      if (!hasUnpickedGames || !vegasPicks[g.gameNumber]) {
-        vegasPicks[g.gameNumber] = g.favorite || g.homeTeam;
-      }
-    });
-    const mnf = games.find(g => g.isMNF);
+    const { picks: vegasPicks, filledCount } = applyBlankOnlyFavorites(editingPicks, games, { allowLockedGames: true });
     const elvisTb = picks['Elvis']?.tiebreaker || picks['Elvis Presley']?.tiebreaker;
     const tbVal = editingTiebreaker !== ''
       ? editingTiebreaker
-      : (mnf && mnf.overUnder)
-        ? String(Math.round(mnf.overUnder))
+      : (games.some(g => g.isMNF && g.overUnder > 0))
+        ? String(resolveDefaultMnfTiebreaker(games))
         : (elvisTb !== undefined && elvisTb !== null && elvisTb !== '')
           ? String(elvisTb)
-          : '';
+          : String(resolveDefaultMnfTiebreaker(games));
+    const tbWasBlank = editingTiebreaker === '' && tbVal !== '';
+    if (filledCount === 0 && !tbWasBlank) {
+      setSaveSuccessMsg(`✓ All ${games.length} games already have picks for ${selectedContender} — zero existing picks were overwritten.`);
+      setSafeTimeout(() => setSaveSuccessMsg(null), 4000);
+      return;
+    }
     setEditingPicks(vegasPicks);
     setEditingTiebreaker(tbVal);
     onAdminSavePicks(selectedContender, vegasPicks, tbVal !== '' ? Number(tbVal) : '');
-    setSaveSuccessMsg(`✓ Auto-filled & saved Vegas favorites for ${selectedContender}!`);
+    setSaveSuccessMsg(`✓ Filled ${filledCount} blank game(s) with Vegas favorites for ${selectedContender} (existing picks preserved)!`);
     setSafeTimeout(() => setSaveSuccessMsg(null), 4000);
   };
 
