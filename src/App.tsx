@@ -49,6 +49,7 @@ import { db, isFirebaseConfigured } from './lib/firebase-client';
 import { trySilentGoogleAuth } from './services/gmailService';
 import { getStoredMatrixTheme } from './utils/nflTeamThemes';
 import { sanitizeClientSubmissionPicks } from './utils/pickRulesEngine';
+import { normalizeDispatchCanonicalTitles } from './utils/dispatchTitles';
 
 export default function App() {
   // Prune legacy storage artifacts once on app startup & apply stored global theme
@@ -268,12 +269,14 @@ export default function App() {
         const maxSavedWeek = Array.isArray(parsed) ? Math.max(0, ...parsed.map(d => d?.week || d?.weekNumber || 0)) : 0;
         const maxInitialWeek = Math.max(0, ...INITIAL_DISPATCHES.map(d => d?.week || d?.weekNumber || 0));
         if (Array.isArray(parsed) && parsed.length > 0 && maxSavedWeek >= maxInitialWeek) {
-          return parsed;
+          return parsed.map(normalizeDispatchCanonicalTitles);
         }
       }
-      localStorage.setItem('nfl_pool_dispatches_v2', JSON.stringify(INITIAL_DISPATCHES));
+      const normalizedInitial = INITIAL_DISPATCHES.map(normalizeDispatchCanonicalTitles);
+      localStorage.setItem('nfl_pool_dispatches_v2', JSON.stringify(normalizedInitial));
+      return normalizedInitial;
     } catch (e) {}
-    return INITIAL_DISPATCHES;
+    return INITIAL_DISPATCHES.map(normalizeDispatchCanonicalTitles);
   });
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -415,9 +418,9 @@ export default function App() {
           setAllPicks(normalized);
         }
         if (Array.isArray(data.dispatches) && data.dispatches.length > 0) {
-          const cleanDispatches = data.dispatches.filter(d => 
-            d && d.id && d.id !== 'dispatch-2012-classic'
-          );
+          const cleanDispatches = data.dispatches
+            .filter((d: any) => d && d.id && d.id !== 'dispatch-2012-classic')
+            .map((d: any) => normalizeDispatchCanonicalTitles(d));
           if (cleanDispatches.length > 0) {
             setDispatches(prev => {
               const prevMax = Math.max(0, ...prev.map(d => d.week || d.weekNumber || 0));
@@ -609,9 +612,9 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (Array.isArray(data.dispatches) && data.dispatches.length > 0) {
-          const cleanDispatches = data.dispatches.filter((d: any) => 
-            d && d.id && d.id !== 'dispatch-2012-classic'
-          );
+          const cleanDispatches = data.dispatches
+            .filter((d: any) => d && d.id && d.id !== 'dispatch-2012-classic')
+            .map((d: any) => normalizeDispatchCanonicalTitles(d));
           if (cleanDispatches.length > 0) {
             setDispatches(prev => {
               const prevMax = Math.max(0, ...prev.map(d => d.week || d.weekNumber || 0));
@@ -767,16 +770,17 @@ export default function App() {
 
   // Publish a dispatch globally to all users on the wire
   const handlePublishDispatch = useCallback(async (dispatch: WeeklyDispatch) => {
+    const canonicalDispatch = normalizeDispatchCanonicalTitles(dispatch);
     setDispatches(prev => {
-      const idx = prev.findIndex(d => d.id === dispatch.id);
+      const idx = prev.findIndex(d => d.id === canonicalDispatch.id);
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx] = dispatch;
+        copy[idx] = canonicalDispatch;
         return copy;
       }
-      return [dispatch, ...prev];
+      return [canonicalDispatch, ...prev];
     });
-    await publishDispatchGlobally(dispatch);
+    await publishDispatchGlobally(canonicalDispatch);
   }, []);
 
   // Admin updating official game winner & scores
@@ -1149,8 +1153,9 @@ export default function App() {
       localStorage.setItem('nfl_pool_season_history_v3', JSON.stringify(newHistory));
       updateSeasonHistoryGlobally(newHistory).then(res => {
         if (res.dispatches && res.dispatches.length > 0) {
-          setDispatches(res.dispatches);
-          localStorage.setItem('nfl_pool_dispatches_v2', JSON.stringify(res.dispatches));
+          const cleanResDispatches = res.dispatches.map(normalizeDispatchCanonicalTitles);
+          setDispatches(cleanResDispatches);
+          localStorage.setItem('nfl_pool_dispatches_v2', JSON.stringify(cleanResDispatches));
         }
       });
       return newHistory;

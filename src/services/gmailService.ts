@@ -4,6 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Game, Player, PlayerPickData } from '../types';
 import { LEAGUE_CONFIG, getPoolConfig } from '../config/leagueConfig';
+import { DISPATCH_SLOT_NAMES, getCanonicalDispatchTitle } from '../utils/dispatchTitles';
 
 const ai = new GoogleGenAI({
   apiKey: (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ? process.env.GEMINI_API_KEY : '',
@@ -665,7 +666,7 @@ Core rule: Write completely original opening paragraphs every time. NEVER repeat
 NOTE ON THE PENALTY JAR: You may humorously cite contenders into the Umpire Penalty Jar (tracked in Penalty Flags) for bad picking, cellar duty, or whining as classic pool ribbing. DO NOT mention money, dollars, cash, equipment fundraising, or charity.
 
 CONTEXT & FACTS:
-- Dispatch Type: ${type === 'friday' ? 'Friday Wire' : type === 'sunday' ? 'Sunday Night Roast' : 'Tuesday Morning Crown'}
+- Dispatch Title (LOCKED): ${DISPATCH_SLOT_NAMES[type]}
 - Current Week: ${currentWeek}
 - Scenario Status:
 ${scenarioFacts.join('\n')}
@@ -736,11 +737,11 @@ ${type === 'tuesday' ? `• Officially celebrate and crown ${leader?.player.name
 At the top of the mountain sits ${leaderDesc}${chaserDesc}. ${scenarioNote} Check the tiebreakers below and hold onto your hats!`;
 
     const crewChiefRecap = aiRecap || fallbackSundayRecap;
-    const subject = `[NFL Pool 2026] Week ${currentWeek} Sunday Night Roast & Standings`;
+    const subject = `[NFL Pool 2026] ${getCanonicalDispatchTitle('sunday', currentWeek)}`;
 
     const body = 
 `${leagueTitle}
-WEEK ${currentWeek} SUNDAY NIGHT ROAST & STANDINGS DISPATCH
+WEEK ${currentWeek} — ${DISPATCH_SLOT_NAMES.sunday.toUpperCase()}
 Dispatched: Sunday Evening • ${emeritusTitle}: ${emeritusName} • ${adminTitle}: ${adminName} • ${crewChiefTitle}
 
 ================================================================
@@ -773,7 +774,7 @@ Automated Weekly Dispatch System`;
 
   if (type === 'tuesday') {
     const winner = ranked[0] || { player: { name: 'Winner' }, wins: 0, losses: 0 };
-    const subject = `[NFL Pool 2026] Tuesday Morning Crown: ${winner.player.name} Wins Week ${currentWeek}${tiebreakerApplied ? ' (via MNF Tiebreaker)' : ''}!`;
+    const subject = `[NFL Pool 2026] ${getCanonicalDispatchTitle('tuesday', currentWeek)}: ${winner.player.name} Wins Week ${currentWeek}${tiebreakerApplied ? ' (via MNF Tiebreaker)' : ''}!`;
 
     let championRecapParagraph = '';
     if (tiebreakerApplied && tbWinnerName) {
@@ -800,7 +801,7 @@ For those of you currently camping in the cellar—take heart: the season is you
 
     const body = 
 `${leagueTitle}
-WEEK ${currentWeek} TUESDAY MORNING CROWN & FINAL STANDINGS
+WEEK ${currentWeek} — ${DISPATCH_SLOT_NAMES.tuesday.toUpperCase()}
 Dispatched: Tuesday Morning • ${emeritusTitle}: ${emeritusName} • ${adminTitle}: ${adminName} • ${crewChiefTitle}
 
 ================================================================
@@ -830,7 +831,7 @@ Automated Weekly Dispatch System`;
   }
 
   // Friday Wire
-  const subject = `[NFL Pool 2026] The Friday Wire: Week ${currentWeek} Kickoff Notice & Lock Reminders`;
+  const subject = `[NFL Pool 2026] ${getCanonicalDispatchTitle('friday', currentWeek)}`;
   const fallbackFridayRecap = 
 `Good evening contenders! The Week ${currentWeek} weekend slate is officially upon us. All straight-up picks for Sunday's games must be finalized before the 10:00 AM PST early kickoff.
 
@@ -843,7 +844,7 @@ INJURY & NOTEWIRE:
 
   const body = 
 `${leagueTitle}
-WEEK ${currentWeek} FRIDAY WIRE & INJURY DOSSIER
+WEEK ${currentWeek} — ${DISPATCH_SLOT_NAMES.friday.toUpperCase()}
 Dispatched: Friday Evening • ${emeritusTitle}: ${emeritusName} • ${adminTitle}: ${adminName} • ${crewChiefTitle}
 
 ================================================================

@@ -1,6 +1,7 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { WeeklyDispatch, Game, Player, PlayerPickData } from '../types';
+import { DISPATCH_EDITION_BADGES, getCanonicalDispatchTitle, resolveDispatchSlotType } from './dispatchTitles';
 
 /**
  * Utility to generate a publication-grade 2-page PDF for Branham Hills Legacy Football Pool
@@ -48,7 +49,7 @@ export async function generateDispatchPDF(
                 BRANHAM HILLS LEGACY FOOTBALL POOL
               </h1>
               <h2 style="margin: 2px 0 0 0; font-size: 13px; font-weight: 800; color: #ca8a04; text-transform: uppercase; letter-spacing: 0.5px;">
-                ${dispatch.type === 'friday' ? `WEEK ${weekNum} FRIDAY NIGHT WIRE & INJURY INTEL` : dispatch.type === 'sunday' ? `WEEK ${weekNum} SUNDAY NIGHT RECAP & PODIUM SHUFFLE` : `WEEK ${weekNum} CROWN & FINAL STANDINGS`}
+                ${getCanonicalDispatchTitle(resolveDispatchSlotType(dispatch.type, dispatch.id) || 'tuesday', weekNum).toUpperCase()}
               </h2>
             </div>
           </div>
@@ -56,7 +57,7 @@ export async function generateDispatchPDF(
           <!-- Right Side: Dispatch Meta -->
           <div style="text-align: right; font-size: 10px; color: #475569; font-weight: 600;">
             <div style="background-color: #1b3a2b; color: #fde047; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 4px; display: inline-block; margin-bottom: 4px;">
-              ${dispatch.type === 'friday' ? 'DISPATCH 1 OF 3 • FRIDAY WIRE' : dispatch.type === 'sunday' ? 'DISPATCH 2 OF 3 • SUNDAY RECAP' : 'DISPATCH 3 OF 3 • TUESDAY FINAL'}
+              ${DISPATCH_EDITION_BADGES[resolveDispatchSlotType(dispatch.type, dispatch.id) || 'tuesday']}
             </div>
             <div>Commish: Don "The Commish" Threet</div>
             <div>Admin: Joel Threet</div>

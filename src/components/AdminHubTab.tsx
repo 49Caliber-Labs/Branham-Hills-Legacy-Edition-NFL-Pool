@@ -42,6 +42,7 @@ import {
 import { Game, Player, PlayerPickData, SeasonHistory, WeeklyDispatch } from '../types';
 import { formatTeamCityOrRegion } from '../utils/nflTeamThemes';
 import { applyBlankOnlyFavorites, resolveDefaultMnfTiebreaker } from '../utils/pickRulesEngine';
+import { DISPATCH_SLOT_NAMES, getCanonicalDispatchSubject, getCanonicalDispatchTitle } from '../utils/dispatchTitles';
 import { WeeklyAuditSection } from './WeeklyAuditSection';
 import { AdminPinGate } from './AdminPinGate';
 import { isAdminPinUnlocked, setAdminPinUnlocked } from '../utils/adminAuth';
@@ -509,7 +510,7 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
   }, [dispatches, activeSlot, currentWeek]);
 
   const handleTriggerTuesdayPipeline = async () => {
-    if (!window.confirm(`⚡ TUESDAY MASTER PIPELINE (FREEZE, DISPATCH & ROLLOVER):\n\nAre you sure you want to execute the complete atomic Tuesday cycle for Week ${currentWeek}?\n\n1. Ingest official final scores & verify MNF tiebreaker\n2. Crown weekly winner & freeze scores to Historical Vault\n3. Generate & stage Tuesday Crown Dispatch to Gmail\n4. Archive submitted pick sheets & certified ledger to disk\n5. Advance schedule to Week ${currentWeek + 1} & query ESPN spreads\n6. Reset pick sheets and spreadsheet (including Elvis) to pristine clean slates\n7. Schedule Elvis Vegas favorites for 1 hour prior to Week ${currentWeek + 1} opener kickoff`)) {
+    if (!window.confirm(`⚡ TUESDAY MASTER PIPELINE (FREEZE, DISPATCH & ROLLOVER):\n\nAre you sure you want to execute the complete atomic Tuesday cycle for Week ${currentWeek}?\n\n1. Ingest official final scores & verify MNF tiebreaker\n2. Crown weekly winner & freeze scores to Historical Vault\n3. Generate & stage The Weekly Final dispatch to Gmail\n4. Archive submitted pick sheets & certified ledger to disk\n5. Advance schedule to Week ${currentWeek + 1} & query ESPN spreads\n6. Reset pick sheets and spreadsheet (including Elvis) to pristine clean slates\n7. Schedule Elvis Vegas favorites for 1 hour prior to Week ${currentWeek + 1} opener kickoff`)) {
       return;
     }
 
@@ -604,7 +605,7 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
       } else {
         await publishDispatchGlobally(generated);
       }
-      setDispatchActionSuccess(`🎲 Successfully shuffled & rewritten ${activeSlot === 'friday' ? 'Friday Wire' : activeSlot === 'sunday' ? 'Sunday Recap' : 'Tuesday Crown'} with fresh Gemini AI commentary!`);
+      setDispatchActionSuccess(`🎲 Successfully shuffled & rewritten ${DISPATCH_SLOT_NAMES[activeSlot]} with fresh Gemini AI commentary!`);
       setSafeTimeout(() => setDispatchActionSuccess(null), 5000);
     } catch (err: any) {
       console.warn('Backend fetch failed, attempting client-side generation fallback:', err.message);
@@ -628,7 +629,7 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
         } else {
           await publishDispatchGlobally(fallbackDispatch);
         }
-        setDispatchActionSuccess(`🎲 Successfully shuffled & rewritten ${activeSlot === 'friday' ? 'Friday Wire' : activeSlot === 'sunday' ? 'Sunday Recap' : 'Tuesday Crown'} with fresh commentary!`);
+        setDispatchActionSuccess(`🎲 Successfully shuffled & rewritten ${DISPATCH_SLOT_NAMES[activeSlot]} with fresh commentary!`);
         setSafeTimeout(() => setDispatchActionSuccess(null), 5000);
       } catch (fallbackErr: any) {
         console.error('Shuffle dispatch error:', fallbackErr);
@@ -677,13 +678,13 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
     const reader = new FileReader();
     reader.onload = async (uploadEv) => {
       const dataUrl = uploadEv.target?.result as string;
-      const slotLabel = activeSlot === 'friday' ? 'Friday Night Wire' : activeSlot === 'sunday' ? 'Sunday Night Recap' : 'Tuesday Final';
+      const slotLabel = DISPATCH_SLOT_NAMES[activeSlot];
       const newDispatch: WeeklyDispatch = {
         id: `dispatch-${activeSlot}`,
         type: activeSlot,
         week: currentWeek,
         weekNumber: currentWeek,
-        title: `${slotLabel} • Week ${currentWeek}`,
+        title: getCanonicalDispatchTitle(activeSlot, currentWeek),
         subtitle: `Custom uploaded ${isPdf ? '8.5" × 11" PDF BroadSheet' : 'Scan Image'}`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         publishedAt: new Date().toISOString(),
@@ -692,7 +693,7 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
         isPdfUpload: isPdf,
         pdfUrl: isPdf ? dataUrl : undefined,
         imageUrl: !isPdf ? dataUrl : undefined,
-        subject: `[Branham Hills Pool] 🏈 ${slotLabel} • Week ${currentWeek}`,
+        subject: getCanonicalDispatchSubject(activeSlot, currentWeek, '[Branham Hills Pool]'),
         preheader: `Custom uploaded document for ${slotLabel}`,
         consultantQuote: 'Winners Walk, Losers Stalk!'
       };
@@ -2410,9 +2411,9 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {[
-                { id: 'friday' as const, label: 'Friday Night Wire', tag: 'Slot 1', schedule: 'Fri 6:00 PM PST', desc: 'TNF recap, injury wire & weekend preview' },
-                { id: 'sunday' as const, label: 'Sunday Night Recap', tag: 'Slot 2', schedule: 'Sun 8:30 PM PST', desc: 'Sunday frenzy, podium shuffle & MNF preview' },
-                { id: 'tuesday' as const, label: 'Tuesday Final', tag: 'Slot 3', schedule: 'Tue 7:30 AM PST', desc: 'MNF climax, weekly crown & locked standings' }
+                { id: 'friday' as const, label: DISPATCH_SLOT_NAMES.friday, tag: 'Slot 1', schedule: 'Fri 6:00 PM PST', desc: 'TNF recap, injury wire & weekend preview' },
+                { id: 'sunday' as const, label: DISPATCH_SLOT_NAMES.sunday, tag: 'Slot 2', schedule: 'Sun 8:30 PM PST', desc: 'Sunday frenzy, podium shuffle & MNF preview' },
+                { id: 'tuesday' as const, label: DISPATCH_SLOT_NAMES.tuesday, tag: 'Slot 3', schedule: 'Tue 7:30 AM PST', desc: 'MNF climax, weekly crown & locked standings' }
               ].map(s => {
                 const matching = (dispatches || []).filter(d => d.type === s.id || d.id === `dispatch-${s.id}` || d.id?.startsWith(`dispatch-${s.id}-`));
                 const slotDispatch = matching.sort((a, b) => (b.week || 0) - (a.week || 0))[0] || null;
@@ -2477,7 +2478,7 @@ export const AdminHubTab: React.FC<AdminHubTabProps> = memo(({
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
                   <h4 className="font-black text-sm text-amber-950 uppercase tracking-wide">
-                    Slot Operations • {activeSlot === 'friday' ? 'Friday Night Wire' : activeSlot === 'sunday' ? 'Sunday Night Recap' : 'Tuesday Final'}
+                    Slot Operations • {DISPATCH_SLOT_NAMES[activeSlot]}
                   </h4>
                 </div>
                 <p className="text-xs text-amber-900/80 mt-0.5">

@@ -1,4 +1,5 @@
 import { WeeklyDispatch, Game, Player, PlayerPickData } from '../types';
+import { DISPATCH_EDITION_BADGES, getCanonicalDispatchTitle, resolveDispatchSlotType } from './dispatchTitles';
 
 /**
  * Utility to export a fully editable Word Document (.docx / .doc)
@@ -145,9 +146,9 @@ export async function generateDispatchDocx(
       <div class="header-box">
         <div class="gold-badge">⭐ 40th Anniversary Season • EST. 1986</div>
         <h1>BRANHAM HILLS LEGACY FOOTBALL POOL</h1>
-        <h2>${dispatch.type === 'friday' ? `WEEK ${weekNum} FRIDAY NIGHT WIRE & INJURY INTEL` : dispatch.type === 'sunday' ? `WEEK ${weekNum} SUNDAY NIGHT RECAP & PODIUM SHUFFLE` : `WEEK ${weekNum} CROWN & OFFICIAL DISPATCH`}</h2>
+        <h2>${getCanonicalDispatchTitle(resolveDispatchSlotType(dispatch.type, dispatch.id) || 'tuesday', weekNum).toUpperCase()}</h2>
         <p style="font-size: 9.5pt; color: #475569; margin: 0;">
-          <strong>Edition:</strong> ${dispatch.type === 'friday' ? 'Dispatch 1 of 3 (Friday Wire)' : dispatch.type === 'sunday' ? 'Dispatch 2 of 3 (Sunday Recap)' : 'Dispatch 3 of 3 (Tuesday Final)'} &bull; 
+          <strong>Edition:</strong> ${DISPATCH_EDITION_BADGES[resolveDispatchSlotType(dispatch.type, dispatch.id) || 'tuesday']} &bull; 
           <strong>Commissioner:</strong> Don "The Commish" Threet &bull; 
           <strong>Admin:</strong> Joel Threet
         </p>

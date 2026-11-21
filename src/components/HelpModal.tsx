@@ -494,7 +494,7 @@ export const HelpModal: React.FC<HelpModalProps> = memo(({ isOpen, onClose }) =>
                     <span>Dispatches & Custom Admin Message</span>
                   </strong>
                   <p className="text-slate-600">
-                    Generate Friday Wire, Sunday Recap, and Tuesday Final dispatches, edit custom notes under &ldquo;Message from Admin Joel&rdquo;, shuffle takes with Gemini, and auto-draft directly to Gmail.
+                    Generate The Friday Wire and Injury Report, Sunday Night Live, and The Weekly Final dispatches, edit custom notes under &ldquo;Message from Admin Joel&rdquo;, shuffle takes with Gemini, and auto-draft directly to Gmail.
                   </p>
                 </div>
               </div>

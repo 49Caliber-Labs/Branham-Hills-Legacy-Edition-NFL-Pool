@@ -1,229 +1,211 @@
-import https from 'https';
-
 export interface NflInjury {
   player: string;
   team: string;
   position: string;
   injury: string;
-  status: string; // Questionable, Doubtful, Out, Day-to-Day, IR
+  status: string; // Questionable, Doubtful, Out
   poolImpact: 'High' | 'Moderate' | 'Low';
   notes?: string;
+  updatedAt?: string;
 }
 
-// Fallback injury report if external scrape is unreachable (balanced across active NFL teams & positions)
-const FALLBACK_INJURIES: NflInjury[] = [
-  {
-    player: 'Lamar Jackson',
-    team: 'BAL',
-    position: 'QB',
-    injury: 'Back / Knee Rest',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Limited in Thursday session; expected to start Sunday at Buffalo.'
-  },
-  {
-    player: 'Tua Tagovailoa',
-    team: 'MIA',
-    position: 'QB',
-    injury: 'Hip / Thumb',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Game-time decision against New England.'
-  },
-  {
-    player: 'Saquon Barkley',
-    team: 'PHI',
-    position: 'RB',
-    injury: 'Shoulder',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Limited practice participant; full workload expected.'
-  },
-  {
-    player: 'Kenneth Walker III',
-    team: 'SEA',
-    position: 'RB',
-    injury: 'Calf / Ankle',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Zach Charbonnet splitting reps ahead of Monday Night Football.'
-  },
-  {
-    player: 'A.J. Brown',
-    team: 'PHI',
-    position: 'WR',
-    injury: 'Hamstring',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Limited in Friday practice; DeVonta Smith primary read.'
-  },
-  {
-    player: 'Puka Nacua',
-    team: 'LAR',
-    position: 'WR',
-    injury: 'Knee (PCL Sprain)',
-    status: 'Out',
-    poolImpact: 'High',
-    notes: 'Demarcus Robinson and Tyler Johnson absorbing targets.'
-  },
-  {
-    player: 'Tee Higgins',
-    team: 'CIN',
-    position: 'WR',
-    injury: 'Quad',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Game-time call for Sunday morning kickoff vs Tennessee.'
-  },
-  {
-    player: 'Brock Bowers',
-    team: 'LV',
-    position: 'TE',
-    injury: 'Foot',
-    status: 'Questionable',
-    poolImpact: 'Moderate',
-    notes: 'Limited reps in Friday session; expected active.'
-  },
-  {
-    player: 'T.J. Watt',
-    team: 'PIT',
-    position: 'LB',
-    injury: 'Ankle',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'All-Pro edge rusher expected to play vs Cleveland.'
-  },
-  {
-    player: 'Sauce Gardner',
-    team: 'NYJ',
-    position: 'CB',
-    injury: 'Shoulder',
-    status: 'Questionable',
-    poolImpact: 'Moderate',
-    notes: 'Expected to start on boundary.'
-  },
-  {
-    player: 'Christian McCaffrey',
-    team: 'SF',
-    position: 'RB',
-    injury: 'Calf / Achilles Tendinitis',
-    status: 'Out',
-    poolImpact: 'High',
-    notes: 'Jordan Mason handling primary backfield duties.'
-  },
-  {
-    player: 'Deebo Samuel',
-    team: 'SF',
-    position: 'WR',
-    injury: 'Calf Strain',
-    status: 'Out',
-    poolImpact: 'High',
-    notes: 'Multiple-week absence; Jauan Jennings stepping up.'
-  },
-  {
-    player: 'George Kittle',
-    team: 'SF',
-    position: 'TE',
-    injury: 'Hamstring',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'Eric Saubert preparing to take starting tight end snaps.'
-  },
-  {
-    player: 'Fred Warner',
-    team: 'SF',
-    position: 'LB',
-    injury: 'Ankle',
-    status: 'Questionable',
-    poolImpact: 'High',
-    notes: 'All-Pro defensive captain pushing to play.'
-  }
-];
+const ESPN_INJURIES_URL = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries';
+const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+const ACTIVE_STATUS_SET = new Set(['out', 'doubtful', 'questionable']);
+const OFF_SKILL_POSITIONS = new Set(['QB', 'RB', 'WR', 'TE']);
+const DEF_POSITIONS = new Set(['LB', 'CB', 'S', 'DE', 'DT', 'EDGE', 'DL', 'DB']);
 
-// Team mapping table (supports both city prefixes and full team names)
+// Complete 32-franchise mapping supporting cities, full names, mascots, and abbreviations
 const TEAM_CITY_TO_ABBR: Record<string, string> = {
-  'green bay': 'GB',
-  'green bay packers': 'GB',
-  'atlanta': 'ATL',
-  'atlanta falcons': 'ATL',
-  'san francisco': 'SF',
-  'san francisco 49ers': 'SF',
-  'kansas city': 'KC',
-  'kansas city chiefs': 'KC',
-  'buffalo': 'BUF',
-  'buffalo bills': 'BUF',
-  'miami': 'MIA',
-  'miami dolphins': 'MIA',
-  'philadelphia': 'PHI',
-  'philadelphia eagles': 'PHI',
-  'dallas': 'DAL',
-  'dallas cowboys': 'DAL',
-  'baltimore': 'BAL',
-  'baltimore ravens': 'BAL',
-  'cincinnati': 'CIN',
-  'cincinnati bengals': 'CIN',
-  'detroit': 'DET',
-  'detroit lions': 'DET',
-  'minnesota': 'MIN',
-  'minnesota vikings': 'MIN',
-  'chicago': 'CHI',
-  'chicago bears': 'CHI',
-  'houston': 'HOU',
-  'houston texans': 'HOU',
-  'indianapolis': 'IND',
-  'indianapolis colts': 'IND',
-  'jacksonville': 'JAX',
-  'jacksonville jaguars': 'JAX',
-  'tennessee': 'TEN',
-  'tennessee titans': 'TEN',
-  'denver': 'DEN',
-  'denver broncos': 'DEN',
-  'las vegas': 'LV',
-  'las vegas raiders': 'LV',
-  'la chargers': 'LAC',
-  'los angeles chargers': 'LAC',
-  'la rams': 'LAR',
-  'los angeles rams': 'LAR',
-  'seattle': 'SEA',
-  'seattle seahawks': 'SEA',
   'arizona': 'ARI',
   'arizona cardinals': 'ARI',
-  'new orleans': 'NO',
-  'new orleans saints': 'NO',
-  'tampa bay': 'TB',
-  'tampa bay buccaneers': 'TB',
+  'cardinals': 'ARI',
+  'ari': 'ARI',
+  'atlanta': 'ATL',
+  'atlanta falcons': 'ATL',
+  'falcons': 'ATL',
+  'atl': 'ATL',
+  'baltimore': 'BAL',
+  'baltimore ravens': 'BAL',
+  'ravens': 'BAL',
+  'bal': 'BAL',
+  'buffalo': 'BUF',
+  'buffalo bills': 'BUF',
+  'bills': 'BUF',
+  'buf': 'BUF',
   'carolina': 'CAR',
   'carolina panthers': 'CAR',
-  'pittsburgh': 'PIT',
-  'pittsburgh steelers': 'PIT',
+  'panthers': 'CAR',
+  'car': 'CAR',
+  'chicago': 'CHI',
+  'chicago bears': 'CHI',
+  'bears': 'CHI',
+  'chi': 'CHI',
+  'cincinnati': 'CIN',
+  'cincinnati bengals': 'CIN',
+  'bengals': 'CIN',
+  'cin': 'CIN',
   'cleveland': 'CLE',
   'cleveland browns': 'CLE',
-  'ny giants': 'NYG',
-  'new york giants': 'NYG',
-  'ny jets': 'NYJ',
-  'new york jets': 'NYJ',
+  'browns': 'CLE',
+  'cle': 'CLE',
+  'dallas': 'DAL',
+  'dallas cowboys': 'DAL',
+  'cowboys': 'DAL',
+  'dal': 'DAL',
+  'denver': 'DEN',
+  'denver broncos': 'DEN',
+  'broncos': 'DEN',
+  'den': 'DEN',
+  'detroit': 'DET',
+  'detroit lions': 'DET',
+  'lions': 'DET',
+  'det': 'DET',
+  'green bay': 'GB',
+  'green bay packers': 'GB',
+  'packers': 'GB',
+  'gb': 'GB',
+  'houston': 'HOU',
+  'houston texans': 'HOU',
+  'texans': 'HOU',
+  'hou': 'HOU',
+  'indianapolis': 'IND',
+  'indianapolis colts': 'IND',
+  'colts': 'IND',
+  'ind': 'IND',
+  'jacksonville': 'JAX',
+  'jacksonville jaguars': 'JAX',
+  'jaguars': 'JAX',
+  'jax': 'JAX',
+  'jac': 'JAX',
+  'kansas city': 'KC',
+  'kansas city chiefs': 'KC',
+  'chiefs': 'KC',
+  'kc': 'KC',
+  'las vegas': 'LV',
+  'las vegas raiders': 'LV',
+  'raiders': 'LV',
+  'lv': 'LV',
+  'lvr': 'LV',
+  'la chargers': 'LAC',
+  'los angeles chargers': 'LAC',
+  'chargers': 'LAC',
+  'lac': 'LAC',
+  'la rams': 'LAR',
+  'los angeles rams': 'LAR',
+  'rams': 'LAR',
+  'lar': 'LAR',
+  'miami': 'MIA',
+  'miami dolphins': 'MIA',
+  'dolphins': 'MIA',
+  'mia': 'MIA',
+  'minnesota': 'MIN',
+  'minnesota vikings': 'MIN',
+  'vikings': 'MIN',
+  'min': 'MIN',
   'new england': 'NE',
   'new england patriots': 'NE',
+  'patriots': 'NE',
+  'ne': 'NE',
+  'new orleans': 'NO',
+  'new orleans saints': 'NO',
+  'saints': 'NO',
+  'no': 'NO',
+  'ny giants': 'NYG',
+  'new york giants': 'NYG',
+  'giants': 'NYG',
+  'nyg': 'NYG',
+  'ny jets': 'NYJ',
+  'new york jets': 'NYJ',
+  'jets': 'NYJ',
+  'nyj': 'NYJ',
+  'philadelphia': 'PHI',
+  'philadelphia eagles': 'PHI',
+  'eagles': 'PHI',
+  'phi': 'PHI',
+  'pittsburgh': 'PIT',
+  'pittsburgh steelers': 'PIT',
+  'steelers': 'PIT',
+  'pit': 'PIT',
+  'san francisco': 'SF',
+  'san francisco 49ers': 'SF',
+  '49ers': 'SF',
+  'niners': 'SF',
+  'sf': 'SF',
+  'seattle': 'SEA',
+  'seattle seahawks': 'SEA',
+  'seahawks': 'SEA',
+  'sea': 'SEA',
+  'tampa bay': 'TB',
+  'tampa bay buccaneers': 'TB',
+  'buccaneers': 'TB',
+  'bucs': 'TB',
+  'tb': 'TB',
+  'tennessee': 'TEN',
+  'tennessee titans': 'TEN',
+  'titans': 'TEN',
+  'ten': 'TEN',
   'washington': 'WAS',
-  'washington commanders': 'WAS'
+  'washington commanders': 'WAS',
+  'commanders': 'WAS',
+  'was': 'WAS',
+  'wsh': 'WAS',
 };
+
+const TEAM_SORTED_KEYS = Object.keys(TEAM_CITY_TO_ABBR).sort((a, b) => b.length - a.length);
+
+function addAbbrWithAliases(set: Set<string>, rawAbbr: string): void {
+  const abbr = rawAbbr.toUpperCase().trim();
+  if (!abbr) return;
+  set.add(abbr);
+  if (abbr === 'WAS' || abbr === 'WSH') {
+    set.add('WAS');
+    set.add('WSH');
+  } else if (abbr === 'LAR' || abbr === 'LA') {
+    set.add('LAR');
+    set.add('LA');
+  } else if (abbr === 'JAX' || abbr === 'JAC') {
+    set.add('JAX');
+    set.add('JAC');
+  } else if (abbr === 'LV' || abbr === 'LVR') {
+    set.add('LV');
+    set.add('LVR');
+  }
+}
+
+function normalizeDisplayAbbr(rawAbbr: string): string {
+  const upper = rawAbbr.toUpperCase().trim();
+  if (upper === 'WSH') return 'WAS';
+  if (upper === 'JAC') return 'JAX';
+  if (upper === 'LA') return 'LAR';
+  if (upper === 'LVR') return 'LV';
+  return upper;
+}
+
+function resolveSingleTeamAbbr(rawName?: string): string | null {
+  if (typeof rawName !== 'string') return null;
+  const lower = rawName.toLowerCase().trim();
+  if (!lower) return null;
+
+  const direct = TEAM_CITY_TO_ABBR[lower];
+  if (direct) return direct;
+
+  for (const key of TEAM_SORTED_KEYS) {
+    if (key.length <= 3) continue; // avoid accidental substring hits on 2-3 char codes
+    if (lower.includes(key)) {
+      return TEAM_CITY_TO_ABBR[key];
+    }
+  }
+  return null;
+}
 
 function resolveTargetAbbrs(activeTeamNames?: string[]): Set<string> | null {
   if (!activeTeamNames || activeTeamNames.length === 0) return null;
   const set = new Set<string>();
   for (const name of activeTeamNames) {
-    const lower = name.toLowerCase().trim();
-    const direct = TEAM_CITY_TO_ABBR[lower];
-    if (direct) {
-      set.add(direct);
-      if (direct === 'WAS') set.add('WSH');
-      continue;
-    }
-    for (const [key, abbr] of Object.entries(TEAM_CITY_TO_ABBR)) {
-      if (lower.includes(key)) {
-        set.add(abbr);
-        if (abbr === 'WAS') set.add('WSH');
-      }
+    const resolved = resolveSingleTeamAbbr(name);
+    if (resolved) {
+      addAbbrWithAliases(set, resolved);
     }
   }
   return set.size > 0 ? set : null;
@@ -231,149 +213,308 @@ function resolveTargetAbbrs(activeTeamNames?: string[]): Set<string> | null {
 
 function determineImpact(pos: string, status: string): 'High' | 'Moderate' | 'Low' {
   const normStatus = status.toLowerCase();
-  const isKeyPos = ['QB', 'RB', 'WR', 'TE'].includes(pos);
   if (pos === 'QB') return 'High';
-  if (isKeyPos && (normStatus.includes('out') || normStatus.includes('doubtful') || normStatus.includes('questionable'))) {
-    return 'High';
+  if (OFF_SKILL_POSITIONS.has(pos)) {
+    if (normStatus.includes('out') || normStatus.includes('doubtful') || normStatus.includes('questionable')) {
+      return 'High';
+    }
+    return 'Moderate';
   }
-  if (isKeyPos) return 'Moderate';
-  if (['CB', 'DE', 'LB', 'S'].includes(pos) && normStatus.includes('out')) return 'Moderate';
+  if (DEF_POSITIONS.has(pos) && (normStatus.includes('out') || normStatus.includes('doubtful'))) {
+    return 'Moderate';
+  }
   return 'Low';
 }
 
-/**
- * Scrapes live NFL injury reports from web endpoints with a 4-second timeout.
- * Falls back gracefully to curated reports if network is unavailable.
- */
-export async function fetchLiveNflInjuries(activeTeamNames?: string[]): Promise<NflInjury[]> {
-  const targetAbbrs = resolveTargetAbbrs(activeTeamNames);
-  const filteredFallback = targetAbbrs && targetAbbrs.size > 0
-    ? FALLBACK_INJURIES.filter(inj => targetAbbrs.has(inj.team.toUpperCase()))
-    : FALLBACK_INJURIES;
+function normalizeStatusLabel(rawStatus: string): 'Out' | 'Doubtful' | 'Questionable' | null {
+  const lower = rawStatus.trim().toLowerCase();
+  if (lower === 'out') return 'Out';
+  if (lower === 'doubtful') return 'Doubtful';
+  if (lower === 'questionable') return 'Questionable';
+  return null;
+}
 
-  if (typeof window !== 'undefined' || !https || typeof https.get !== 'function') {
-    return filteredFallback.length >= 6 ? filteredFallback.slice(0, 10) : FALLBACK_INJURIES.slice(0, 10);
+function extractInjuryDescription(item: any): string {
+  const typeText = typeof item?.details?.type === 'string' ? item.details.type.trim() : '';
+  const detailText = typeof item?.details?.detail === 'string' ? item.details.detail.trim() : '';
+
+  if (typeText && typeText.toLowerCase() !== 'not specified') {
+    if (
+      detailText &&
+      detailText.toLowerCase() !== 'not specified' &&
+      !typeText.toLowerCase().includes(detailText.toLowerCase())
+    ) {
+      return `${typeText} (${detailText})`;
+    }
+    return typeText;
   }
+
+  const shortComment = typeof item?.shortComment === 'string' ? item.shortComment.trim() : '';
+  const parenMatch = shortComment.match(/\(([^)]+)\)/);
+  if (parenMatch && parenMatch[1]) {
+    const inner = parenMatch[1].trim();
+    if (inner) {
+      return inner.charAt(0).toUpperCase() + inner.slice(1);
+    }
+  }
+
+  return 'Undisclosed';
+}
+
+function getStatusWeight(status: string): number {
+  const lower = status.toLowerCase();
+  if (lower === 'out') return 3;
+  if (lower === 'doubtful') return 2;
+  if (lower === 'questionable') return 1;
+  return 0;
+}
+
+function getImpactWeight(impact: 'High' | 'Moderate' | 'Low'): number {
+  if (impact === 'High') return 3;
+  if (impact === 'Moderate') return 2;
+  return 1;
+}
+
+function getPositionWeight(pos: string): number {
+  if (pos === 'QB') return 5;
+  if (pos === 'RB' || pos === 'WR') return 4;
+  if (pos === 'TE') return 3;
+  if (DEF_POSITIONS.has(pos)) return 2;
+  return 1;
+}
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatPstTimestamp(iso?: string): string {
+  const dateObj = iso ? new Date(iso) : new Date();
+  const validDate = isNaN(dateObj.getTime()) ? new Date() : dateObj;
   try {
-    const rawData = await new Promise<string>((resolve, reject) => {
-      const req = https.get('https://www.rotowire.com/football/tables/injury-report.php?team=ALL&pos=ALL', {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        timeout: 4000
-      }, res => {
-        if (res.statusCode !== 200) {
-          return reject(new Error(`Status ${res.statusCode}`));
-        }
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => resolve(body));
-      });
-      req.on('error', reject);
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Rotowire timeout'));
-      });
-    });
-
-    const parsed = JSON.parse(rawData);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error('Empty or invalid injury array');
-    }
-
-    const invalidStatusRegex = /Reserve-Ret|Retired|Suspension|PUP|NFI/i;
-    const candidates: NflInjury[] = [];
-
-    for (const item of parsed) {
-      if (!item.player || !item.position || !item.team) continue;
-      if (item.team === 'FA') continue;
-      if (invalidStatusRegex.test(item.status)) continue;
-
-      const teamAbbr = item.team.toUpperCase();
-      if (targetAbbrs && targetAbbrs.size > 0 && !targetAbbrs.has(teamAbbr)) {
-        continue;
-      }
-
-      const pos = item.position.toUpperCase();
-      const isDef = ['CB', 'DE', 'LB', 'S', 'DT', 'EDGE'].includes(pos);
-      const isOffSkill = ['QB', 'RB', 'WR', 'TE'].includes(pos);
-      if (!isDef && !isOffSkill) continue;
-
-      const status = item.status || 'Questionable';
-      const impact = determineImpact(pos, status);
-      candidates.push({
-        player: item.player,
-        team: teamAbbr,
-        position: pos,
-        injury: item.injury || 'Undisclosed',
-        status: status,
-        poolImpact: impact
-      });
-    }
-
-    // Bucket candidates by position to guarantee balanced positions in the report
-    const qbs = candidates.filter(c => c.position === 'QB');
-    const rbs = candidates.filter(c => c.position === 'RB');
-    const wrs = candidates.filter(c => c.position === 'WR');
-    const tes = candidates.filter(c => c.position === 'TE');
-    const defs = candidates.filter(c => ['CB', 'DE', 'LB', 'S', 'DT', 'EDGE'].includes(c.position));
-
-    // Balanced selection: strictly cap QBs to 2, ensure RBs, WRs, TEs, and DEF playmakers are represented
-    const selected: NflInjury[] = [];
-    selected.push(...qbs.slice(0, 2));
-    selected.push(...rbs.slice(0, 2));
-    selected.push(...wrs.slice(0, 3));
-    selected.push(...tes.slice(0, 1));
-    selected.push(...defs.slice(0, 2));
-
-    if (selected.length >= 6) {
-      return selected;
-    }
-  } catch (err: any) {
-    console.warn('[Injury Scraper] External scrape notice, using curated reports:', err.message);
+    return (
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      }).format(validDate) + ' PT'
+    );
+  } catch {
+    return validDate.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   }
-
-  return filteredFallback.length >= 6 ? filteredFallback.slice(0, 10) : FALLBACK_INJURIES.slice(0, 10);
 }
 
 /**
- * Builds the uniform, high-contrast HTML table for the Friday Wire dispatch.
+ * Fetches live current-season NFL injury data directly from ESPN's public JSON endpoint.
+ * Works identically in Node server and browser via universal fetch with a 10s AbortController timeout.
+ * Never returns fabricated/hardcoded players on failure.
+ */
+export async function fetchLiveNflInjuries(activeTeamNames?: string[]): Promise<NflInjury[]> {
+  const targetAbbrs = resolveTargetAbbrs(activeTeamNames);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const response = await fetch(ESPN_INJURIES_URL, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`ESPN HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const teamGroups = Array.isArray(payload?.injuries) ? payload.injuries : [];
+    if (teamGroups.length === 0) {
+      throw new Error('Empty ESPN team injury array');
+    }
+
+    const nowMs = Date.now();
+    const candidates: NflInjury[] = [];
+
+    for (const teamGroup of teamGroups) {
+      const teamDisplayName = typeof teamGroup?.displayName === 'string' ? teamGroup.displayName : '';
+      const resolvedTeamAbbr = resolveSingleTeamAbbr(teamDisplayName);
+      const groupInjuries = Array.isArray(teamGroup?.injuries) ? teamGroup.injuries : [];
+
+      for (const item of groupInjuries) {
+        const statusLabel = typeof item?.status === 'string' ? normalizeStatusLabel(item.status) : null;
+        if (!statusLabel) continue;
+
+        const dateIso = typeof item?.date === 'string' ? item.date.trim() : '';
+        if (!dateIso) continue;
+        const updatedMs = Date.parse(dateIso);
+        if (isNaN(updatedMs) || nowMs - updatedMs > FOURTEEN_DAYS_MS) {
+          continue;
+        }
+
+        const pos = typeof item?.athlete?.position?.abbreviation === 'string'
+          ? item.athlete.position.abbreviation.toUpperCase().trim()
+          : '';
+        if (!OFF_SKILL_POSITIONS.has(pos) && !DEF_POSITIONS.has(pos)) {
+          continue;
+        }
+
+        const athleteTeamAbbr = typeof item?.athlete?.team?.abbreviation === 'string'
+          ? item.athlete.team.abbreviation.toUpperCase().trim()
+          : '';
+        const rawTeamAbbr = athleteTeamAbbr || resolvedTeamAbbr || '';
+        if (!rawTeamAbbr) continue;
+
+        const displayTeam = normalizeDisplayAbbr(rawTeamAbbr);
+        if (targetAbbrs && targetAbbrs.size > 0 && !targetAbbrs.has(rawTeamAbbr) && !targetAbbrs.has(displayTeam)) {
+          continue;
+        }
+
+        const playerName = typeof item?.athlete?.displayName === 'string'
+          ? item.athlete.displayName.trim()
+          : '';
+        if (!playerName) continue;
+
+        const shortComment = typeof item?.shortComment === 'string' ? item.shortComment.trim() : '';
+        const notes = shortComment.length > 15 ? shortComment : undefined;
+        const injury = extractInjuryDescription(item);
+        const poolImpact = determineImpact(pos, statusLabel);
+
+        candidates.push({
+          player: playerName,
+          team: displayTeam,
+          position: pos,
+          injury,
+          status: statusLabel,
+          poolImpact,
+          ...(notes ? { notes } : {}),
+          updatedAt: dateIso,
+        });
+      }
+    }
+
+    candidates.sort((a, b) => {
+      const statusDiff = getStatusWeight(b.status) - getStatusWeight(a.status);
+      if (statusDiff !== 0) return statusDiff;
+      const impactDiff = getImpactWeight(b.poolImpact) - getImpactWeight(a.poolImpact);
+      if (impactDiff !== 0) return impactDiff;
+      const posDiff = getPositionWeight(b.position) - getPositionWeight(a.position);
+      if (posDiff !== 0) return posDiff;
+      const dateA = a.updatedAt ? Date.parse(a.updatedAt) : 0;
+      const dateB = b.updatedAt ? Date.parse(b.updatedAt) : 0;
+      return dateB - dateA;
+    });
+
+    const selected: NflInjury[] = [];
+    const seenKeys = new Set<string>();
+    const teamCounts = new Map<string, number>();
+
+    const trySelect = (entry: NflInjury): boolean => {
+      if (selected.length >= 12) return false;
+      const key = `${entry.player.toLowerCase()}|${entry.team}`;
+      if (seenKeys.has(key)) return false;
+      const count = teamCounts.get(entry.team) || 0;
+      if (count >= 2) return false;
+      selected.push(entry);
+      seenKeys.add(key);
+      teamCounts.set(entry.team, count + 1);
+      return true;
+    };
+
+    const takeBucket = (predicate: (c: NflInjury) => boolean, limit: number) => {
+      let taken = 0;
+      for (const c of candidates) {
+        if (taken >= limit) break;
+        if (predicate(c) && trySelect(c)) {
+          taken++;
+        }
+      }
+    };
+
+    takeBucket(c => c.position === 'QB', 2);
+    takeBucket(c => c.position === 'RB', 3);
+    takeBucket(c => c.position === 'WR', 3);
+    takeBucket(c => c.position === 'TE', 2);
+    takeBucket(c => DEF_POSITIONS.has(c.position), 2);
+
+    for (const c of candidates) {
+      if (selected.length >= 12) break;
+      trySelect(c);
+    }
+
+    return selected;
+  } catch (err: any) {
+    console.warn('[Injury Scraper] Live ESPN injury wire unavailable:', err?.message || err);
+    return [];
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Builds the uniform, high-contrast HTML table for The Friday Wire and Injury Report dispatch.
  * Follows strict single-quote constraints: ALL HTML attributes use single quotes.
  */
-export function renderInjuryReportTableHtml(injuries: NflInjury[]): string {
-  const rowsHtml = injuries.map((inj, idx) => {
-    const bg = idx % 2 === 0 ? '#ecfdf5' : '#ffffff';
-    let statusBadgeColor = '#991b1b'; // dark red
-    let statusBg = '#fee2e2'; // light red
-    if (inj.status.toLowerCase().includes('questionable')) {
-      statusBadgeColor = '#92400e'; // dark amber
-      statusBg = '#fef3c7'; // light amber
-    } else if (inj.status.toLowerCase().includes('probable')) {
-      statusBadgeColor = '#065f46'; // dark green
-      statusBg = '#d1fae5'; // light green
-    }
+export function renderInjuryReportTableHtml(injuries: NflInjury[], fetchedAtIso?: string): string {
+  const updatedLabel = formatPstTimestamp(fetchedAtIso);
 
-    let impactBadge = "<span style='background:#fef2f2; color:#b91c1c; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>HIGH</span>";
-    if (inj.poolImpact === 'Moderate') {
-      impactBadge = "<span style='background:#fffbeb; color:#d97706; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>MODERATE</span>";
-    } else if (inj.poolImpact === 'Low') {
-      impactBadge = "<span style='background:#f3f4f6; color:#4b5563; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>LOW</span>";
-    }
+  const rowsHtml =
+    injuries.length === 0
+      ? `<tr style='background:#f8fafc; border-bottom:1px solid #d1fae5;'>
+      <td colspan='6' style='padding:14px 12px; color:#334155; text-align:center; line-height:1.5; font-size:12px;'>
+        Live ESPN NFL injury feed is temporarily unreachable or has no active <strong>Out / Doubtful / Questionable</strong> designations posted for remaining matchups. Verify official team inactive lists prior to kickoff.
+      </td>
+    </tr>`
+      : injuries
+          .map((inj, idx) => {
+            const bg = idx % 2 === 0 ? '#ecfdf5' : '#ffffff';
+            const normStatus = inj.status.toLowerCase();
+            let statusBadgeColor = '#991b1b';
+            let statusBg = '#fee2e2';
+            if (normStatus.includes('questionable')) {
+              statusBadgeColor = '#92400e';
+              statusBg = '#fef3c7';
+            }
 
-    return `<tr style='background:${bg}; border-bottom:1px solid #d1fae5;'>
-      <td style='padding:8px 10px; font-weight:bold; color:#064e3b;'>${inj.player}</td>
-      <td style='padding:8px 10px; font-weight:bold; color:#022c22; text-align:center;'>${inj.team}</td>
-      <td style='padding:8px 10px; color:#374151; text-align:center; font-family:monospace;'>${inj.position}</td>
-      <td style='padding:8px 10px; color:#4b5563;'>${inj.injury}</td>
-      <td style='padding:8px 10px; text-align:center;'><span style='background:${statusBg}; color:${statusBadgeColor}; font-weight:bold; font-size:10px; padding:3px 8px; border-radius:4px; text-transform:uppercase;'>${inj.status}</span></td>
-      <td style='padding:8px 10px; text-align:center;'>${impactBadge}</td>
+            let impactBadge =
+              "<span style='background:#fef2f2; color:#b91c1c; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>HIGH</span>";
+            if (inj.poolImpact === 'Moderate') {
+              impactBadge =
+                "<span style='background:#fffbeb; color:#d97706; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>MODERATE</span>";
+            } else if (inj.poolImpact === 'Low') {
+              impactBadge =
+                "<span style='background:#f3f4f6; color:#4b5563; font-weight:bold; font-size:10px; padding:2px 6px; border-radius:4px;'>LOW</span>";
+            }
+
+            const safePlayer = escapeHtml(inj.player);
+            const safeTeam = escapeHtml(inj.team);
+            const safePos = escapeHtml(inj.position);
+            const safeInjury = escapeHtml(inj.injury);
+            const safeStatus = escapeHtml(inj.status);
+            const notesHtml = inj.notes
+              ? `<div style='font-size:10px; font-weight:normal; color:#475569; margin-top:2px; line-height:1.35;'>${escapeHtml(inj.notes)}</div>`
+              : '';
+
+            return `<tr style='background:${bg}; border-bottom:1px solid #d1fae5;'>
+      <td style='padding:8px 10px; font-weight:bold; color:#064e3b; vertical-align:top;'>${safePlayer}${notesHtml}</td>
+      <td style='padding:8px 10px; font-weight:bold; color:#022c22; text-align:center; vertical-align:top;'>${safeTeam}</td>
+      <td style='padding:8px 10px; color:#374151; text-align:center; font-family:monospace; vertical-align:top;'>${safePos}</td>
+      <td style='padding:8px 10px; color:#4b5563; vertical-align:top;'>${safeInjury}</td>
+      <td style='padding:8px 10px; text-align:center; vertical-align:top;'><span style='background:${statusBg}; color:${statusBadgeColor}; font-weight:bold; font-size:10px; padding:3px 8px; border-radius:4px; text-transform:uppercase;'>${safeStatus}</span></td>
+      <td style='padding:8px 10px; text-align:center; vertical-align:top;'>${impactBadge}</td>
     </tr>`;
-  }).join('');
+          })
+          .join('');
 
   return `<div style='background:#ffffff; border:1px solid #d4af37; border-radius:8px; overflow:hidden; margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,0.05);'>
   <div style='background:#064e3b; padding:10px 14px; border-bottom:2px solid #d4af37; display:flex; justify-content:space-between; align-items:center;'>
     <span style='color:#fef08a; font-weight:bold; font-size:13px; text-transform:uppercase; letter-spacing:1px;'>⚡ LIVE NFL INJURY WIRE & GAME IMPACT REPORT</span>
-    <span style='color:#a7f3d0; font-size:11px; font-style:italic;'>Official Friday Briefing</span>
+    <span style='color:#a7f3d0; font-size:11px; font-style:italic;'>Live ESPN Wire • Updated ${escapeHtml(updatedLabel)}</span>
   </div>
   <table style='width:100%; border-collapse:collapse; font-size:12px; font-family:sans-serif;'>
     <thead>

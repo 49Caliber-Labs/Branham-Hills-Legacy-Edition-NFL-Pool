@@ -21,6 +21,7 @@ import { buildVibrantWeeklyDispatch, getGeminiDailyUsage, GEMINI_DAILY_CALL_LIMI
 import { scrapeSundayNflAction } from './src/services/nflSundayScraperService.ts';
 import { loadCommishQuotes, addCommishQuote } from './src/services/commishArchivesService.ts';
 import { formatTeamCityOrRegion } from './src/utils/nflTeamThemes.ts';
+import { DISPATCH_EDITION_BADGES, DISPATCH_SLOT_NAMES, normalizeDispatchCanonicalTitles } from './src/utils/dispatchTitles.ts';
 import {
   PickActor,
   MissedPickPolicy,
@@ -377,7 +378,7 @@ function sanitizePoolState(state: PoolStorageState): PoolStorageState {
   const rawDispatches = Array.isArray(state.dispatches) ? state.dispatches : [];
   for (const d of rawDispatches) {
     if (d && d.id) {
-      dispatchMap.set(d.id, d);
+      dispatchMap.set(d.id, normalizeDispatchCanonicalTitles(d));
     }
   }
   const editionOrder: Record<string, number> = { tuesday: 3, sunday: 2, friday: 1 };
@@ -1118,7 +1119,7 @@ async function syncFromCloud(): Promise<boolean> {
               await setDoc(doc(db, 'metadata', 'dispatches'), { dispatches: poolState.dispatches });
             }, 1).catch(() => {});
           } else if (cloudMaxWk > localMaxWk) {
-            poolState.dispatches = cloudDispatches;
+            poolState.dispatches = cloudDispatches.map(d => normalizeDispatchCanonicalTitles(d));
             console.log(`[Firebase Sync] Hydrated Week ${cloudMaxWk} dispatches from Firestore.`);
           }
         }
@@ -2113,7 +2114,7 @@ export async function runMasterClockTick(): Promise<void> {
     );
     const shouldTriggerFriday = !poolState.clockLedger.completedEvents[fridayKey] && ((livePulse.tnfFinal || livePulse.phase === 'TNF_FINAL' || isFridayCalendarTrigger) || isFallbackFriday);
     if (shouldTriggerFriday) {
-      console.log(`[Master Clock] ⏰ Trigger: Auto-generating Friday Night Wire for Week ${activeWeek} (Gemini Crew Chief)...`);
+      console.log(`[Master Clock] ⏰ Trigger: Auto-generating ${DISPATCH_SLOT_NAMES.friday} for Week ${activeWeek} (Gemini Crew Chief)...`);
       try {
         await syncFromCloud();
       } catch (sErr: any) {
@@ -2132,7 +2133,7 @@ export async function runMasterClockTick(): Promise<void> {
       await stageDispatchToGmail(dispatch);
       poolState.clockLedger.completedEvents[fridayKey] = new Date().toISOString();
       await savePoolState(poolState, false);
-      console.log(`[Master Clock] ✓ Friday Night Wire generated, published & staged to Gmail.`);
+      console.log(`[Master Clock] ✓ ${DISPATCH_SLOT_NAMES.friday} generated, published & staged to Gmail.`);
     }
 
     // 2B: Synchronized Sunday Night Sequence (SNF Final OR Scheduled Sunday Time with live games completed)
@@ -2627,9 +2628,9 @@ app.get('/api/admin/clock-diagnostics', async (_req, res) => {
     };
 
     const headerAudits = [
-      auditHeader(fridayDispatch, 'DISPATCH 1 OF 3: FRIDAY NIGHT WIRE'),
-      auditHeader(sundayDispatch, 'DISPATCH 2 OF 3: SUNDAY NIGHT RECAP'),
-      auditHeader(tuesdayDispatch, 'DISPATCH 3 OF 3: TUESDAY FINAL')
+      auditHeader(fridayDispatch, DISPATCH_EDITION_BADGES.friday),
+      auditHeader(sundayDispatch, DISPATCH_EDITION_BADGES.sunday),
+      auditHeader(tuesdayDispatch, DISPATCH_EDITION_BADGES.tuesday)
     ];
 
     // 2. Randomization Check across runs
@@ -2935,7 +2936,7 @@ function normalizeIncomingDispatch(rawInput: any): WeeklyDispatch | null {
 
   if (!content && !title) return null;
 
-  return {
+  return normalizeDispatchCanonicalTitles({
     id: String(dispatchId),
     type: finalType,
     week: weekNum,
@@ -2944,7 +2945,7 @@ function normalizeIncomingDispatch(rawInput: any): WeeklyDispatch | null {
     content: String(content),
     consultantQuote: String(consultantQuote),
     timestamp: item.timestamp || new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
-  };
+  });
 }
 
 function safeJsonParse(str: string): any {
@@ -3594,7 +3595,7 @@ export async function executeTuesdayCyclePipeline(targetWeek?: number, overrideW
   const winnerName = compileResult.winnerName;
 
   // Stage 3: Generate Tuesday Morning Crown Dispatch and stage to Gmail (using effective picks for currentWeek)
-  console.log(`[Tuesday Pipeline] [Stage 3/7] Generating Tuesday Crown Dispatch & staging to Gmail...`);
+  console.log(`[Tuesday Pipeline] [Stage 3/7] Generating ${DISPATCH_SLOT_NAMES.tuesday} Dispatch & staging to Gmail...`);
   const effectiveWeekPicks = getEffectivePicksForWeek(currentWeek, poolState.picks);
   const dispatch = await buildVibrantWeeklyDispatch(
     'tuesday',

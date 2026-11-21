@@ -256,7 +256,7 @@ export async function runOperationalChecks({
     const passesFriday = hasSubject && hasBody && hasLockReminders;
 
     results.push({
-      title: 'Friday Kickoff Wire Payload Generator',
+      title: 'The Friday Wire and Injury Report Payload Generator',
       category: 'Dispatches',
       status: passesFriday ? 'passed' : 'failed',
       detail: passesFriday
@@ -265,7 +265,7 @@ export async function runOperationalChecks({
     });
   } catch (e: any) {
     results.push({
-      title: 'Friday Kickoff Wire Payload Generator',
+      title: 'The Friday Wire and Injury Report Payload Generator',
       category: 'Dispatches',
       status: 'failed',
       detail: `Error generating Friday payload: ${e.message}`
@@ -273,7 +273,7 @@ export async function runOperationalChecks({
   }
 
   // -------------------------------------------------------------
-  // 3. Dispatch Generation: Sunday Night Roast (Standardized Mandatory Fields)
+  // 3. Dispatch Generation: Sunday Night Live (Standardized Mandatory Fields)
   // -------------------------------------------------------------
   try {
     const sundayPayload = await generateDispatchPayload('sunday', games, players, picks);
@@ -288,7 +288,7 @@ export async function runOperationalChecks({
     const allMandatoryPassed = payloadValidation.allPopulated && (!wireValidation || wireValidation.allPopulated);
 
     results.push({
-      title: 'Sunday Night Roast: Mandatory Fields (Recaps, Standings, MNF Highlights)',
+      title: 'Sunday Night Live: Mandatory Fields (Recaps, Standings, MNF Highlights)',
       category: 'Dispatches',
       status: allMandatoryPassed ? 'passed' : 'failed',
       detail: allMandatoryPassed
@@ -302,7 +302,7 @@ export async function runOperationalChecks({
     });
   } catch (e: any) {
     results.push({
-      title: 'Sunday Night Roast: Mandatory Fields',
+      title: 'Sunday Night Live: Mandatory Fields',
       category: 'Dispatches',
       status: 'failed',
       detail: `Error generating Sunday payload: ${e.message}`,
@@ -315,7 +315,7 @@ export async function runOperationalChecks({
   }
 
   // -------------------------------------------------------------
-  // 4. Dispatch Generation: Tuesday Morning Crown (Standardized Mandatory Fields & Scoring Rules)
+  // 4. Dispatch Generation: The Weekly Final (Standardized Mandatory Fields & Scoring Rules)
   // -------------------------------------------------------------
   try {
     const tuesdayPayload = await generateDispatchPayload('tuesday', games, players, picks);
@@ -344,7 +344,7 @@ export async function runOperationalChecks({
     }
 
     results.push({
-      title: 'Tuesday Morning Crown: Mandatory Fields & Tiebreaker Rule',
+      title: 'The Weekly Final: Mandatory Fields & Tiebreaker Rule',
       category: 'Scoring Rules',
       status: allMandatoryPassed ? 'passed' : 'failed',
       detail: allMandatoryPassed
@@ -358,7 +358,7 @@ export async function runOperationalChecks({
     });
   } catch (e: any) {
     results.push({
-      title: 'Tuesday Morning Crown: Mandatory Fields & Tiebreaker Rule',
+      title: 'The Weekly Final: Mandatory Fields & Tiebreaker Rule',
       category: 'Scoring Rules',
       status: 'failed',
       detail: `Error generating Tuesday payload: ${e.message}`,

@@ -4,6 +4,7 @@ import { formatTeamCityOrRegion } from '../utils/nflTeamThemes';
 import { getRandomCommishQuote, getRandomBanterIntro, getCommishLoreSamples, CommishQuote } from './commishArchivesService';
 import { fetchLiveNflInjuries, renderInjuryReportTableHtml } from './injuryScraperService';
 import { scrapeSundayNflAction, renderSundayActionAndUpsetsHtml } from './nflSundayScraperService';
+import { DISPATCH_EDITION_BADGES, DISPATCH_SLOT_NAMES, getCanonicalDispatchSubject, getCanonicalDispatchTitle } from '../utils/dispatchTitles';
 import { GoogleGenAI } from '@google/genai';
 
 export interface GeneratedDispatch {
@@ -147,7 +148,7 @@ ${params.activePlayerNames.join(', ')}
 CRITICAL DIRECTIVE: DO NOT MENTION ANY INACTIVE CONTENDERS. Specifically, NEVER mention Jeff, Christine, Richard, Nick, Robert, Kristine, Keith, or Juan. They are inactive this season!
 
 CALCULATED GROUND-TRUTH FACTS (YOU MUST STRICTLY HONOR THESE EXACT NUMBERS, TEAMS & NAMES — NEVER INVENT MATCHUPS):
-- Dispatch Type: ${params.type === 'friday' ? 'Friday Night Wire' : params.type === 'sunday' ? 'Sunday Night Recap' : 'Tuesday Morning Crown'}
+- Dispatch Title (LOCKED — NEVER invent alternate titles): ${DISPATCH_SLOT_NAMES[params.type]}
 - Current Slate Week: Week ${params.dispatchWeek}
 ${params.type === 'tuesday' && params.tuesdayFacts ? params.tuesdayFacts : params.tnfFacts}
 ${params.clinchFacts}
@@ -667,6 +668,7 @@ export async function buildVibrantWeeklyDispatch(
   // -------------------------------------------------------------
   const module1 = 
 `<div style='background:#022c22; border:2px solid #d4af37; padding:20px; text-align:center; border-radius:8px; margin-bottom:16px; font-family:sans-serif;'>
+  <div style='display:inline-block; background:#fbbf24; color:#022c22; font-weight:900; font-size:10px; padding:3px 12px; border-radius:4px; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:8px;'>${DISPATCH_EDITION_BADGES[type]}</div>
   <div style='color:#fbbf24; font-size:11px; font-weight:bold; letter-spacing:2px; text-transform:uppercase;'>BRANHAM HILLS FOOTBALL POOL</div>
   <h1 style='color:#fef08a; font-size:26px; margin:6px 0; font-weight:800; text-transform:uppercase;'>LEGACY EDITION</h1>
   <div style='display:inline-block; background:#d4af37; color:#022c22; font-weight:bold; font-size:10px; padding:4px 14px; border-radius:12px; margin:8px 0; text-transform:uppercase;'>⭐ 40TH ANNIVERSARY SEASON • EST. 1986 ⭐</div>
@@ -811,7 +813,7 @@ export async function buildVibrantWeeklyDispatch(
   let deterministicBody = '';
 
   if (type === 'friday') {
-    module2Title = 'FRIDAY NIGHT WIRE: THURSDAY RECAP, 49ERS OUTLOOK & CONTENDER BANTER';
+    module2Title = `${DISPATCH_SLOT_NAMES.friday.toUpperCase()} • WEEK ${dispatchWeek}`;
     
     // 1. Thursday Night Football Detailed Recap / Outlook
     let tnfSection = '';
@@ -882,7 +884,7 @@ export async function buildVibrantWeeklyDispatch(
     const contenderBanterSection = generateDynamicFridayBanterHtml(activePlayers, seasonHistory, ranked, dispatchWeek);
     deterministicBody = `${tnfSection}${ninersSection}${contenderBanterSection}`;
   } else if (type === 'sunday') {
-    module2Title = `SUNDAY NIGHT FRENZY: GRIDIRON RUNDOWN, CONTENDER STREAKS & MONDAY NIGHT PREVIEW • WEEK ${dispatchWeek}`;
+    module2Title = `${DISPATCH_SLOT_NAMES.sunday.toUpperCase()} • WEEK ${dispatchWeek}`;
 
     const sundayGames = games.filter(g => !g.isTNF && !g.isMNF);
     const finalSundayGames = sundayGames.filter(g => g.status === 'final');
@@ -944,7 +946,7 @@ export async function buildVibrantWeeklyDispatch(
     const streakSectionHtml = generateDynamicContenderStreakHtml(activePlayers, seasonHistory, ranked, dispatchWeek);
     deterministicBody = `${nflRundownHtml}${scrapedWireHtml}${poolStandingsBanterHtml}${streakSectionHtml}`;
   } else {
-    module2Title = `TUESDAY FINAL: CROWNING THE WEEK ${dispatchWeek} CHAMPION 👑`;
+    module2Title = `${DISPATCH_SLOT_NAMES.tuesday.toUpperCase()} • WEEK ${dispatchWeek} 👑`;
 
     // Dynamic, rich, non-cookie-cutter narrative recap engine
     const tieGame = games.find(g => isGameTie(g));
@@ -1382,7 +1384,7 @@ export async function buildVibrantWeeklyDispatch(
       .flatMap(g => [g.awayTeam, g.homeTeam])
       .filter(Boolean);
     const injuries = await fetchLiveNflInjuries(activeTeams);
-    const injuryTableHtml = renderInjuryReportTableHtml(injuries);
+    const injuryTableHtml = renderInjuryReportTableHtml(injuries, new Date().toISOString());
 
     const sundayGames = games.filter(g => !g.isTNF && !g.isMNF);
     const snfMatchup = sundayGames.find(g => g.isSNF) || sundayGames[sundayGames.length - 1];
@@ -1645,11 +1647,7 @@ export async function buildVibrantWeeklyDispatch(
   ${module6}
 </div>`;
 
-  const titles = {
-    friday: `FRIDAY WIRE AND INJURY REPORT • Week ${dispatchWeek}`,
-    sunday: `Sunday Night Recap • Week ${dispatchWeek}`,
-    tuesday: `Tuesday Final • Week ${dispatchWeek} Crown`
-  };
+  const canonicalTitle = getCanonicalDispatchTitle(type, dispatchWeek);
 
   const subtitles = {
     friday: 'Thursday recap, scraped NFL injury wire & weekend matchup lookahead',
@@ -1662,7 +1660,7 @@ export async function buildVibrantWeeklyDispatch(
     type,
     week: dispatchWeek,
     weekNumber: dispatchWeek,
-    title: titles[type],
+    title: canonicalTitle,
     subtitle: subtitles[type],
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     publishedAt: new Date().toISOString(),
@@ -1671,7 +1669,7 @@ export async function buildVibrantWeeklyDispatch(
     body_html: fullHtml,
     podcastUrl,
     podcastTitle,
-    subject: `[Branham Hills Pool: Legacy Edition] 🏈 ${titles[type]}`,
+    subject: getCanonicalDispatchSubject(type, dispatchWeek),
     preheader: subtitles[type],
     consultantQuote: randomQuote,
     adminNote: finalAdminNote,

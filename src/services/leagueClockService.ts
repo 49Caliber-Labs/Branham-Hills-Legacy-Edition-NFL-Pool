@@ -89,7 +89,7 @@ export function evaluateLeaguePulse(games: Game[]): LeaguePulse {
   if (allGamesFinal) {
     phase = 'MNF_FINAL';
     phaseLabel = 'Week Complete (MNF Final)';
-    phaseDescription = `All ${totalGames} games final. Tuesday crown ready. Safe to Freeze & Advance.`;
+    phaseDescription = `All ${totalGames} games final. The Weekly Final ready. Safe to Freeze & Advance.`;
     recommendedDispatch = 'tuesday';
   } else if (mnfLive) {
     phase = 'MNF_LIVE';
@@ -98,7 +98,7 @@ export function evaluateLeaguePulse(games: Game[]): LeaguePulse {
   } else if (snfFinal || (finalGames >= nonMnfCount && !mnfFinal)) {
     phase = 'SNF_FINAL';
     phaseLabel = 'Sunday Slate Final';
-    phaseDescription = 'Sunday action wrapped. Sunday Night Recap ready.';
+    phaseDescription = 'Sunday action wrapped. Sunday Night Live ready.';
     recommendedDispatch = 'sunday';
   } else if (liveGames > 0) {
     phase = 'SUNDAY_LIVE';
@@ -107,7 +107,7 @@ export function evaluateLeaguePulse(games: Game[]): LeaguePulse {
   } else if (tnfFinal) {
     phase = 'TNF_FINAL';
     phaseLabel = 'TNF Final';
-    phaseDescription = 'Thursday opener final. Friday Night Wire ready.';
+    phaseDescription = 'Thursday opener final. The Friday Wire and Injury Report ready.';
     recommendedDispatch = 'friday';
   } else if (tnfLive) {
     phase = 'TNF_LIVE';

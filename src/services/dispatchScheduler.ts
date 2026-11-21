@@ -1,5 +1,6 @@
 import { Game, Player, PlayerPickData } from '../types';
 import { createGmailDraft, sendGmailMessage, generateDispatchPayload, getCachedAccessToken } from './gmailService';
+import { DISPATCH_SLOT_NAMES } from '../utils/dispatchTitles';
 
 export interface DispatchScheduleItem {
   id: string;
@@ -35,7 +36,7 @@ export const SCHEDULE_DEFINITIONS: Omit<DispatchScheduleItem, 'status'>[] = [
   {
     id: 'dispatch-friday',
     type: 'friday',
-    title: '🏈 Friday Night Wire & Injury Dossier',
+    title: `🏈 ${DISPATCH_SLOT_NAMES.friday}`,
     cadence: 'Every Friday',
     scheduledTime: '6:00 PM PST',
     description: 'Weekend kickoff notices, injury flags, straight-up lock reminders, and active roster checklist.'
@@ -43,7 +44,7 @@ export const SCHEDULE_DEFINITIONS: Omit<DispatchScheduleItem, 'status'>[] = [
   {
     id: 'dispatch-sunday',
     type: 'sunday',
-    title: '📊 Sunday Night Roast & Standings',
+    title: `📊 ${DISPATCH_SLOT_NAMES.sunday}`,
     cadence: 'Every Sunday Night',
     scheduledTime: '11:15 PM PST',
     description: 'Current pool standings entering Monday Night Football, 2-paragraph Crew Chief recap, leaders & losers roast, and tiebreaker stakes.'
@@ -51,7 +52,7 @@ export const SCHEDULE_DEFINITIONS: Omit<DispatchScheduleItem, 'status'>[] = [
   {
     id: 'dispatch-tuesday',
     type: 'tuesday',
-    title: '🏆 Tuesday Morning Crown & Final Standings',
+    title: `🏆 ${DISPATCH_SLOT_NAMES.tuesday}`,
     cadence: 'Every Tuesday Morning',
     scheduledTime: '7:30 AM PST',
     description: 'Official weekly champion crowned, final points ledger, friendly cellar banter, and blank Week 2 sheet drop.'

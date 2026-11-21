@@ -20,6 +20,7 @@ import { generateDispatchPDF } from '../utils/pdfGenerator';
 import { signInWithGoogle, createGmailDraft, getCachedAccessToken } from '../services/gmailService';
 import { publishDispatchGlobally } from '../services/poolSyncService';
 import { evaluateLeaguePulse } from '../services/leagueClockService';
+import { DISPATCH_SLOT_NAMES, getCanonicalDispatchTitle, resolveDispatchSlotType } from '../utils/dispatchTitles';
 import { getPoolConfig } from '../config/leagueConfig';
 
 interface FridayWireTabProps {
@@ -316,21 +317,21 @@ export const FridayWireTab: React.FC<FridayWireTabProps> = memo(({
   const slots = [
     {
       id: 'friday' as const,
-      label: 'Friday Night Wire',
+      label: DISPATCH_SLOT_NAMES.friday,
       tag: 'Slot 1',
       schedule: 'Fri 6:00 PM PST',
       desc: 'TNF Recap, weekend locks & marquee matchups'
     },
     {
       id: 'sunday' as const,
-      label: 'Sunday Night Recap',
+      label: DISPATCH_SLOT_NAMES.sunday,
       tag: 'Slot 2',
       schedule: 'Sun 8:30 PM PST',
       desc: 'Sunday frenzy, podium shuffle & MNF preview'
     },
     {
       id: 'tuesday' as const,
-      label: 'Tuesday Final',
+      label: DISPATCH_SLOT_NAMES.tuesday,
       tag: 'Slot 3',
       schedule: 'Tue 7:30 AM PST',
       desc: 'MNF climax, weekly crown & locked standings'
@@ -346,7 +347,13 @@ export const FridayWireTab: React.FC<FridayWireTabProps> = memo(({
     });
     if (matching.length === 0) return null;
     matching.sort((a, b) => (b.week || 0) - (a.week || 0));
-    return matching[0];
+    const found = matching[0];
+    const slotType = resolveDispatchSlotType(found.type, found.id);
+    if (!slotType) return found;
+    return {
+      ...found,
+      title: getCanonicalDispatchTitle(slotType, found.week || found.weekNumber),
+    };
   }, [dispatches, activeSlot, currentWeek]);
 
   // Dynamically synchronize the Official Standings Ledger in the dispatch with live seasonHistory
@@ -584,7 +591,7 @@ export const FridayWireTab: React.FC<FridayWireTabProps> = memo(({
         } else {
           await publishDispatchGlobally(data.dispatch);
         }
-        setRewriteNotice(`✨ Dispatch rewritten! Fresh AI Commish commentary & live scores updated for ${activeSlot === 'friday' ? 'Friday Wire' : activeSlot === 'sunday' ? 'Sunday Recap' : 'Tuesday Crown'}.`);
+        setRewriteNotice(`✨ Dispatch rewritten! Fresh AI Commish commentary & live scores updated for ${DISPATCH_SLOT_NAMES[activeSlot]}.`);
         setSafeTimeout(() => setRewriteNotice(null), 6000);
         if (isAdmin) checkGeminiKeyStatus();
       }
@@ -609,7 +616,7 @@ export const FridayWireTab: React.FC<FridayWireTabProps> = memo(({
         } else {
           await publishDispatchGlobally(fallbackDispatch);
         }
-        setRewriteNotice(`✨ Dispatch rewritten! Fresh Commish commentary updated for ${activeSlot === 'friday' ? 'Friday Wire' : activeSlot === 'sunday' ? 'Sunday Recap' : 'Tuesday Crown'}.`);
+        setRewriteNotice(`✨ Dispatch rewritten! Fresh Commish commentary updated for ${DISPATCH_SLOT_NAMES[activeSlot]}.`);
         setSafeTimeout(() => setRewriteNotice(null), 6000);
       } catch (fallbackErr: any) {
         console.error('Rewrite dispatch error:', fallbackErr);
